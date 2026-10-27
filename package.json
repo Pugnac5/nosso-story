@@ -4,7 +4,7 @@
   "private": true,
   "description": "Aplicação de compartilhamento de fotos para casamento.",
   "engines": {
-    "node": ">=22.0.0 <25.0.0"
+    "node": ">=22.12.0 <25.0.0"
   },
   "workspaces": [
     "client",
@@ -14,7 +14,7 @@
     "dev": "concurrently -k -n API,WEB -c green,blue \"npm run dev --workspace server\" \"npm run dev --workspace client\"",
     "build": "npm run build --workspace client",
     "start": "node server/src/server.js",
-    "check": "npm run build && node --check server/src/app.js && node --check server/src/server.js"
+    "check": "npm run build && node --check server/src/app.js && node --check server/src/server.js && node --check server/src/lib/supabase.js && node --check server/src/lib/guest-session.js && node --check server/src/routes/guests.routes.js && node --check server/src/routes/photos.routes.js"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

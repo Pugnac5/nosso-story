@@ -1,206 +1,695 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ArrowDown,
-  ArrowUpRight,
+  AlertCircle,
   Camera,
-  Check,
+  CameraOff,
+  CheckCircle2,
   Heart,
   Image as ImageIcon,
-  MonitorPlay,
+  LoaderCircle,
+  LogOut,
   RefreshCw,
+  Send,
   ShieldCheck,
   Sparkles,
-  Wifi,
-  WifiOff,
+  Trash2,
+  UserRound,
+  UsersRound,
+  X,
 } from 'lucide-react';
 
-const API_HEALTH_URL = '/api/health';
+const FILTERS = [
+  { key: 'natural', label: 'Original', css: 'none', canvas: 'none' },
+  { key: 'warm', label: 'Quente', css: 'sepia(.22) saturate(1.2)', canvas: 'sepia(0.22) saturate(1.2)' },
+  { key: 'mono', label: 'P&B', css: 'grayscale(1)', canvas: 'grayscale(1)' },
+  { key: 'rose', label: 'Romântico', css: 'saturate(1.28) hue-rotate(-10deg)', canvas: 'saturate(1.28) hue-rotate(-10deg)' },
+  { key: 'soft', label: 'Suave', css: 'brightness(1.06) contrast(.93) saturate(.86)', canvas: 'brightness(1.06) contrast(0.93) saturate(0.86)' },
+];
+const EMOJIS = ['❤️', '🥂', '💍', '✨', '🎉', '🥰', '🤍', '💐'];
+
+async function readApiResponse(response) {
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || `A solicitação falhou (${response.status}).`);
+    error.status = response.status;
+    error.code = payload.code;
+    error.field = payload.field;
+    throw error;
+  }
+  return payload;
+}
+
+function dataUrlToImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Não foi possível abrir a imagem selecionada.'));
+    image.src = dataUrl;
+  });
+}
+
+function wrapCanvasText(context, text, maxWidth) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (line && context.measureText(candidate).width > maxWidth) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  if (lines.length <= 2) return lines;
+  return [`${lines[0]} ${lines[1]}`.slice(0, 66), `${lines.slice(2).join(' ').slice(0, 66)}`];
+}
+
+async function createEditedJpeg(dataUrl, filterKey, caption, emoji) {
+  const image = await dataUrlToImage(dataUrl);
+  const maxDimension = 1600;
+  const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Seu navegador não conseguiu preparar a imagem.');
+
+  const filter = FILTERS.find((item) => item.key === filterKey) || FILTERS[0];
+  context.filter = filter.canvas;
+  context.drawImage(image, 0, 0, width, height);
+  context.filter = 'none';
+
+  const cleanCaption = String(caption || '').trim().slice(0, 100);
+  const cleanEmoji = String(emoji || '').trim().slice(0, 16);
+  if (cleanCaption || cleanEmoji) {
+    const overlayHeight = Math.round(height * 0.28);
+    const gradient = context.createLinearGradient(0, height - overlayHeight, 0, height);
+    gradient.addColorStop(0, 'rgba(20, 12, 16, 0)');
+    gradient.addColorStop(1, 'rgba(20, 12, 16, 0.70)');
+    context.fillStyle = gradient;
+    context.fillRect(0, height - overlayHeight, width, overlayHeight);
+
+    const margin = Math.round(width * 0.07);
+    const maxTextWidth = width - margin * 2;
+    const emojiSize = Math.max(24, Math.min(58, Math.round(width * 0.055)));
+    const fontSize = Math.max(20, Math.min(42, Math.round(width * 0.038)));
+    let baseline = height - Math.max(24, Math.round(height * 0.045));
+
+    context.textAlign = 'center';
+    context.textBaseline = 'alphabetic';
+    context.fillStyle = '#ffffff';
+    context.shadowColor = 'rgba(0, 0, 0, .35)';
+    context.shadowBlur = 7;
+    context.shadowOffsetY = 2;
+
+    const lines = [];
+    context.font = `600 ${fontSize}px system-ui, sans-serif`;
+    if (cleanCaption) lines.push(...wrapCanvasText(context, cleanCaption, maxTextWidth));
+    const lineHeight = Math.round(fontSize * 1.2);
+    if (cleanEmoji) {
+      context.font = `${emojiSize}px "Apple Color Emoji", "Segoe UI Emoji", sans-serif`;
+      const emojiBaseline = lines.length ? baseline - (lines.length * lineHeight) - 5 : baseline;
+      context.fillText(cleanEmoji, width / 2, emojiBaseline, maxTextWidth);
+    }
+    if (lines.length) {
+      context.font = `600 ${fontSize}px system-ui, sans-serif`;
+      lines.forEach((line, index) => context.fillText(line, width / 2, baseline - (lines.length - index - 1) * lineHeight, maxTextWidth));
+    }
+    context.shadowColor = 'transparent';
+    context.shadowBlur = 0;
+    context.shadowOffsetY = 0;
+  }
+
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('Não foi possível preparar o arquivo da foto.'))), 'image/jpeg', 0.86);
+  });
+  if (blob.size > 8 * 1024 * 1024) {
+    throw new Error('Esta foto ficou maior que 8 MB. Tente usar uma imagem menor.');
+  }
+  return blob;
+}
+
+function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete }) {
+  if (!photos.length) {
+    return (
+      <div className="stage-empty">
+        <span className="stage-empty-icon"><ImageIcon size={26} /></span>
+        <h3>{emptyTitle}</h3>
+        <p>{emptyDescription}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="stage-photo-grid">
+      {photos.map((photo) => (
+        <article className="stage-photo-card" key={photo.id}>
+          {photo.url ? (
+            <img className="stage-photo-img" src={photo.url} alt={photo.caption || 'Foto do casamento'} loading="lazy" />
+          ) : (
+            <div className="stage-photo-unavailable"><ImageIcon size={24} /><span>Prévia indisponível</span></div>
+          )}
+          {(photo.emoji || photo.caption) && (
+            <div className="stage-photo-caption">
+              {photo.emoji && <span>{photo.emoji}</span>}
+              {photo.caption && <p>{photo.caption}</p>}
+            </div>
+          )}
+          <div className="stage-photo-meta">
+            <span>{new Date(photo.created_at).toLocaleDateString('pt-BR')}</span>
+            {onDelete && (
+              <button className="stage-icon-button stage-delete-button" type="button" onClick={() => onDelete(photo)} aria-label="Excluir foto" title="Excluir foto">
+                <Trash2 size={15} />
+              </button>
+            )}
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
 
 function App() {
-  const [apiStatus, setApiStatus] = useState('checking');
-  const [lastChecked, setLastChecked] = useState(null);
+  const [health, setHealth] = useState({ state: 'checking', supabaseConfigured: false });
+  const [guest, setGuest] = useState(null);
+  const [activeTab, setActiveTab] = useState('participar');
+  const [name, setName] = useState('');
+  const [whatsapp, setWhatsapp] = useState('');
+  const [nameStatus, setNameStatus] = useState('idle');
+  const [registering, setRegistering] = useState(false);
+  const [message, setMessage] = useState(null);
+  const [myPhotos, setMyPhotos] = useState([]);
+  const [stories, setStories] = useState([]);
+  const [loadingPhotos, setLoadingPhotos] = useState(false);
+  const [storiesError, setStoriesError] = useState('');
 
-  const checkApi = useCallback(async () => {
-    setApiStatus('checking');
-
+  const loadHealth = useCallback(async () => {
     try {
-      const response = await fetch(API_HEALTH_URL, {
-        headers: { Accept: 'application/json' },
-      });
+      const data = await readApiResponse(await fetch('/api/health', { headers: { Accept: 'application/json' } }));
+      setHealth({ state: 'online', supabaseConfigured: Boolean(data.supabaseConfigured) });
+    } catch {
+      setHealth({ state: 'offline', supabaseConfigured: false });
+    }
+  }, []);
 
-      if (!response.ok) {
-        throw new Error(`A API respondeu com status ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (data.status !== 'ok') {
-        throw new Error('A API respondeu, mas não confirmou o estado esperado.');
-      }
-
-      setApiStatus('online');
-      setLastChecked(new Date());
+  const loadMyPhotos = useCallback(async () => {
+    try {
+      const data = await readApiResponse(await fetch('/api/guests/me/photos', { credentials: 'same-origin' }));
+      setMyPhotos(data.photos || []);
     } catch (error) {
-      console.error('Falha ao consultar a API:', error);
-      setApiStatus('offline');
-      setLastChecked(new Date());
+      if (error.status === 401) setMyPhotos([]);
+      else setMessage({ type: 'error', text: error.message });
+    }
+  }, []);
+
+  const loadStories = useCallback(async () => {
+    setStoriesError('');
+    try {
+      const data = await readApiResponse(await fetch('/api/photos/stories'));
+      setStories(data.photos || []);
+    } catch (error) {
+      setStoriesError(error.message);
+      setStories([]);
     }
   }, []);
 
   useEffect(() => {
-    checkApi();
-  }, [checkApi]);
+    let ignore = false;
+    loadHealth();
+    fetch('/api/guests/me', { credentials: 'same-origin' })
+      .then(async (response) => {
+        if (response.status === 401) return null;
+        return readApiResponse(response);
+      })
+      .then((data) => {
+        if (ignore || !data?.guest) return;
+        setGuest(data.guest);
+        setActiveTab('participar');
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!ignore) loadStories();
+      });
+    return () => { ignore = true; };
+  }, [loadHealth, loadStories]);
 
-  const formattedCheckTime = lastChecked
-    ? lastChecked.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    : null;
+  useEffect(() => {
+    if (guest) loadMyPhotos();
+  }, [guest, loadMyPhotos]);
+
+  useEffect(() => {
+    const trimmed = name.trim().replace(/\s+/g, ' ');
+    if (trimmed.length < 2) {
+      setNameStatus('idle');
+      return undefined;
+    }
+
+    let ignore = false;
+    setNameStatus('checking');
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch(`/api/guests/check-name?name=${encodeURIComponent(trimmed)}`);
+        const data = await readApiResponse(response);
+        if (!ignore) setNameStatus(data.available ? 'available' : 'unavailable');
+      } catch (error) {
+        if (!ignore) setNameStatus(error.code === 'SUPABASE_NOT_CONFIGURED' ? 'error' : 'error');
+      }
+    }, 450);
+
+    return () => {
+      ignore = true;
+      window.clearTimeout(timer);
+    };
+  }, [name]);
+
+  const handleRegister = async (event) => {
+    event.preventDefault();
+    setMessage(null);
+    const normalizedName = name.trim().replace(/\s+/g, ' ');
+    if (normalizedName.length < 2) {
+      setMessage({ type: 'error', text: 'Informe seu nome completo para continuar.' });
+      return;
+    }
+    if (nameStatus === 'unavailable') {
+      setMessage({ type: 'error', text: 'Este nome já está cadastrado. Confira a grafia ou fale com o responsável pelo casamento.' });
+      return;
+    }
+
+    setRegistering(true);
+    try {
+      const data = await readApiResponse(await fetch('/api/guests', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ name: normalizedName, whatsapp: whatsapp.trim() || null }),
+      }));
+      setGuest(data.guest);
+      setActiveTab('participar');
+      setMessage({ type: 'success', text: `Tudo certo, ${data.guest.name}! Agora você já pode tirar sua foto.` });
+      setName('');
+      setWhatsapp('');
+      await loadMyPhotos();
+    } catch (error) {
+      if (error.status === 409) setNameStatus('unavailable');
+      setMessage({ type: 'error', text: error.message });
+    } finally {
+      setRegistering(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/guests/logout', { method: 'POST', credentials: 'same-origin' });
+    } finally {
+      setGuest(null);
+      setMyPhotos([]);
+      setActiveTab('participar');
+      setMessage({ type: 'success', text: 'A sessão deste navegador foi encerrada.' });
+    }
+  };
+
+  const handleDeletePhoto = async (photo) => {
+    if (!window.confirm('Deseja excluir esta foto da sua galeria e do story compartilhado?')) return;
+    try {
+      await readApiResponse(await fetch(`/api/photos/${encodeURIComponent(photo.id)}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+      }));
+      setMyPhotos((previous) => previous.filter((item) => item.id !== photo.id));
+      await loadStories();
+      setMessage({ type: 'success', text: 'Foto excluída.' });
+    } catch (error) {
+      setMessage({ type: 'error', text: error.message });
+    }
+  };
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#inicio" aria-label="Nosso Story, início">
+    <div className="app-shell stage-shell">
+      <header className="topbar stage-topbar">
+        <a className="brand" href="#inicio" aria-label="Nosso Story, início" onClick={() => setActiveTab('participar')}>
           <span className="brand-mark"><Heart size={19} strokeWidth={1.8} /></span>
           <span className="brand-name">nosso<span>story</span></span>
         </a>
-
-        <div className="topbar-note">
-          <span className="topbar-dot" />
-          UM LUGAR PARA GUARDAR MEMÓRIAS
-        </div>
-
-        <a className="topbar-link" href="#como-funciona">
-          Como funciona <ArrowUpRight size={15} />
-        </a>
+        <div className="topbar-note"><span className="topbar-dot" /> UMA HISTÓRIA FEITA POR TODOS NÓS</div>
+        {guest ? (
+          <button className="stage-account-button" type="button" onClick={handleLogout} title="Encerrar sessão">
+            <UserRound size={16} /><span>{guest.name}</span><LogOut size={14} />
+          </button>
+        ) : (
+          <span className="topbar-link"><ShieldCheck size={15} /> Acesso dos convidados</span>
+        )}
       </header>
 
-      <main>
-        <section className="hero section-wrap" id="inicio">
-          <div className="hero-copy">
-            <div className="eyebrow"><Sparkles size={14} /> O GRANDE DIA, POR TODOS OS OLHARES</div>
-            <h1>Uma história<br />feita por <span>todos nós.</span></h1>
-            <p className="hero-description">
-              Os melhores momentos não acontecem só diante das câmeras oficiais.
-              Aqui, cada convidado ajuda a contar a história do casamento.
-            </p>
-
-            <div className="hero-actions">
-              <a className="button button-primary" href="#status-api">
-                Conhecer o projeto <ArrowDown size={17} />
-              </a>
-              <span className="action-caption"><ShieldCheck size={16} /> Feito para compartilhar com cuidado</span>
-            </div>
-
-            <div className="hero-footnote">
-              <span className="footnote-line" />
-              <span>Uma foto, uma lembrança, uma história inteira.</span>
-            </div>
+      <main className="stage-main" id="inicio">
+        <section className="stage-welcome">
+          <div>
+            <span className="eyebrow"><Sparkles size={14} /> CADA OLHAR CONTA UMA HISTÓRIA</span>
+            <h1>O grande dia,<br />do jeito que <span>vocês viveram.</span></h1>
+            <p>Registre os momentos espontâneos, escreva uma mensagem e compartilhe a lembrança com todos os convidados.</p>
           </div>
-
-          <div className="hero-art" aria-label="Prévia ilustrativa da experiência de fotos do casamento">
-            <div className="art-orbit orbit-one" />
-            <div className="art-orbit orbit-two" />
-            <div className="floating-note note-top"><Sparkles size={15} /> momentos espontâneos</div>
-            <div className="photo-stack">
-              <div className="photo-card photo-card-back">
-                <div className="photo-abstract abstract-back"><span>♡</span></div>
-                <div className="photo-card-footer"><span>uma lembrança</span><Heart size={14} /></div>
-              </div>
-              <div className="photo-card photo-card-front">
-                <div className="photo-abstract abstract-front">
-                  <div className="sun-glow" />
-                  <div className="arch arch-one" />
-                  <div className="arch arch-two" />
-                  <div className="bouquet bouquet-one">✿</div>
-                  <div className="bouquet bouquet-two">✿</div>
-                  <div className="photo-caption">the beginning<br />of forever</div>
-                </div>
-                <div className="photo-card-footer"><span>o nosso grande dia</span><Heart size={14} fill="currentColor" /></div>
-              </div>
+          <div className="stage-health-card">
+            <div className="stage-health-heading">
+              {health.state === 'online' ? <CheckCircle2 size={19} /> : health.state === 'offline' ? <AlertCircle size={19} /> : <LoaderCircle className="spin" size={19} />}
+              <strong>{health.state === 'online' ? 'Aplicação conectada' : health.state === 'offline' ? 'API indisponível' : 'Conferindo conexão'}</strong>
             </div>
-            <div className="floating-note note-bottom"><span className="note-avatar">A</span><span>feito por vocês, com carinho</span><Heart size={15} /></div>
-            <div className="art-sparkle sparkle-one">✳</div>
-            <div className="art-sparkle sparkle-two">✦</div>
+            <p>{health.supabaseConfigured ? 'A configuração do Supabase foi detectada pelo backend.' : 'O cadastro será habilitado depois de configurar as credenciais do Supabase.'}</p>
+            <button className="stage-link-button" type="button" onClick={loadHealth}><RefreshCw size={13} /> Verificar novamente</button>
           </div>
         </section>
 
-        <section className="connection-section" id="status-api">
-          <div className="section-wrap connection-inner">
-            <div className="connection-copy">
-              <span className="section-kicker">PRIMEIRA ETAPA · AMBIENTE DE DESENVOLVIMENTO</span>
-              <h2>O começo de algo especial.</h2>
-              <p>Estamos preparando a base do Nosso Story. Nesta etapa, a interface já conversa com o backend Node.js/Express.</p>
-            </div>
+        <nav className="stage-tabs" aria-label="Navegação da aplicação">
+          <button type="button" className={activeTab === 'participar' ? 'stage-tab active' : 'stage-tab'} onClick={() => { setActiveTab('participar'); setMessage(null); }}>
+            {guest ? <Camera size={17} /> : <UserRound size={17} />}{guest ? 'Tirar minha foto' : 'Participar'}
+          </button>
+          <button type="button" className={activeTab === 'galeria' ? 'stage-tab active' : 'stage-tab'} onClick={() => { setActiveTab('galeria'); setMessage(null); if (guest) loadMyPhotos(); }}>
+            <ImageIcon size={17} /> Minhas fotos {guest ? <span className="stage-tab-count">{myPhotos.length}</span> : null}
+          </button>
+          <button type="button" className={activeTab === 'story' ? 'stage-tab active' : 'stage-tab'} onClick={() => { setActiveTab('story'); setMessage(null); loadStories(); }}>
+            <UsersRound size={17} /> Story do casamento
+          </button>
+        </nav>
 
-            <div className={`api-card api-card-${apiStatus}`}>
-              <div className="api-card-top">
-                <span className="api-icon">
-                  {apiStatus === 'online' ? <Wifi size={20} /> : apiStatus === 'offline' ? <WifiOff size={20} /> : <RefreshCw className="spin" size={20} />}
-                </span>
-                <span className="api-label">STATUS DA API</span>
-                <span className={`status-pill status-${apiStatus}`}>
-                  <span className="status-dot" />
-                  {apiStatus === 'online' ? 'Conectada' : apiStatus === 'offline' ? 'Indisponível' : 'Verificando'}
-                </span>
+        {message && (
+          <div className={`stage-alert stage-alert-${message.type}`} role="status">
+            {message.type === 'success' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
+            <span>{message.text}</span>
+            <button type="button" aria-label="Fechar mensagem" onClick={() => setMessage(null)}><X size={15} /></button>
+          </div>
+        )}
+
+        <section className="stage-content">
+          {activeTab === 'participar' && !guest && (
+            <div className="stage-register-layout">
+              <div className="stage-section-copy">
+                <span className="section-kicker">SEU LUGAR NESSA HISTÓRIA</span>
+                <h2>Vamos começar<br />pelo seu nome.</h2>
+                <p>O cadastro é rapidinho. Seu nome identifica as fotos que você compartilhar; o WhatsApp é opcional e nunca será exibido publicamente.</p>
+                <div className="stage-reassurance"><ShieldCheck size={17} /><span>Suas informações de contato ficam privadas.</span></div>
               </div>
-              <div className="api-card-body">
-                <div>
-                  <strong>{apiStatus === 'online' ? 'Frontend e backend conectados' : apiStatus === 'offline' ? 'Não foi possível conectar' : 'Testando comunicação...'}</strong>
-                  <span>{apiStatus === 'online' ? 'GET /api/health · resposta recebida' : apiStatus === 'offline' ? 'Confira se o servidor está executando na porta 3001.' : 'Aguardando resposta de /api/health.'}</span>
+              <form className="stage-form-card" onSubmit={handleRegister}>
+                <div className="stage-form-heading">
+                  <span className="stage-form-icon"><Heart size={20} /></span>
+                  <div><h3>Participar do casamento</h3><p>Preencha os campos abaixo para liberar a câmera.</p></div>
                 </div>
-                {apiStatus === 'online' && <Check className="api-check" size={21} />}
-              </div>
-              <div className="api-card-bottom">
-                <span>{formattedCheckTime ? `Última verificação: ${formattedCheckTime}` : 'Primeira verificação'}</span>
-                <button className="refresh-button" type="button" onClick={checkApi} disabled={apiStatus === 'checking'}>
-                  <RefreshCw size={14} className={apiStatus === 'checking' ? 'spin' : ''} /> Testar novamente
+                <label className="stage-field-label" htmlFor="guest-name">Nome completo <span>*</span></label>
+                <input
+                  id="guest-name"
+                  className={`stage-input ${nameStatus === 'unavailable' ? 'input-error' : ''}`}
+                  name="name"
+                  autoComplete="name"
+                  maxLength={80}
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="Ex.: Ana Paula Oliveira"
+                  required
+                  aria-describedby="name-feedback"
+                />
+                <div id="name-feedback" className={`stage-field-feedback ${nameStatus === 'unavailable' ? 'feedback-error' : nameStatus === 'available' ? 'feedback-success' : ''}`} aria-live="polite">
+                  {nameStatus === 'checking' && <><LoaderCircle size={13} className="spin" /> Conferindo disponibilidade...</>}
+                  {nameStatus === 'available' && <><CheckCircle2 size={13} /> Nome disponível</>}
+                  {nameStatus === 'unavailable' && <><AlertCircle size={13} /> Este nome já está cadastrado.</>}
+                  {nameStatus === 'error' && 'Não foi possível verificar agora; o servidor validará no envio.'}
+                  {nameStatus === 'idle' && 'O nome precisa ser único neste casamento.'}
+                </div>
+                <label className="stage-field-label" htmlFor="guest-whatsapp">WhatsApp <span className="optional">(opcional)</span></label>
+                <input
+                  id="guest-whatsapp"
+                  className="stage-input"
+                  name="whatsapp"
+                  autoComplete="tel"
+                  inputMode="tel"
+                  maxLength={24}
+                  value={whatsapp}
+                  onChange={(event) => setWhatsapp(event.target.value)}
+                  placeholder="(71) 99999-9999"
+                />
+                <button className="button button-primary stage-submit-button" type="submit" disabled={registering || nameStatus === 'unavailable' || nameStatus === 'checking' || name.trim().length < 2 || health.state === 'offline'}>
+                  {registering ? <><LoaderCircle size={17} className="spin" /> Cadastrando...</> : <>Continuar para a câmera <Camera size={17} /></>}
                 </button>
-              </div>
+                {!health.supabaseConfigured && health.state === 'online' && (
+                  <p className="stage-setup-note">O backend está no ar, mas ainda falta configurar o Supabase para salvar cadastros e fotos.</p>
+                )}
+                <p className="stage-privacy-note">Ao continuar, você concorda que as fotos que publicar poderão aparecer na galeria compartilhada e no telão do casamento.</p>
+              </form>
             </div>
-          </div>
-        </section>
+          )}
 
-        <section className="features section-wrap" id="como-funciona">
-          <div className="features-heading">
-            <span className="section-kicker">O QUE VAMOS CONSTRUIR</span>
-            <h2>Uma experiência. <span>Três formas de lembrar.</span></h2>
-            <p>Uma base simples, pronta para crescer em etapas bem definidas.</p>
-          </div>
+          {activeTab === 'participar' && guest && (
+            <CameraStudio
+              guest={guest}
+              onUploaded={async () => {
+                await Promise.all([loadMyPhotos(), loadStories()]);
+                setMessage({ type: 'success', text: 'Foto publicada! Ela já está na sua galeria e no story do casamento.' });
+              }}
+              setGlobalMessage={setMessage}
+            />
+          )}
 
-          <div className="feature-grid">
-            <article className="feature-card">
-              <div className="feature-icon icon-camera"><Camera size={21} /></div>
-              <span className="feature-number">01 / CONVIDADOS</span>
-              <h3>Capture o momento</h3>
-              <p>Cadastro rápido, câmera do celular e uma prévia para personalizar a foto antes de publicar.</p>
-              <span className="feature-state">Próxima etapa</span>
-            </article>
-            <article className="feature-card">
-              <div className="feature-icon icon-gallery"><ImageIcon size={21} /></div>
-              <span className="feature-number">02 / STORY</span>
-              <h3>Reviva cada lembrança</h3>
-              <p>Uma galeria compartilhada para encontrar as fotos do casamento em um só lugar.</p>
-              <span className="feature-state">Planejado</span>
-            </article>
-            <article className="feature-card">
-              <div className="feature-icon icon-screen"><MonitorPlay size={21} /></div>
-              <span className="feature-number">03 / TELÃO</span>
-              <h3>Todo mundo faz parte</h3>
-              <p>Uma apresentação em tela cheia, repetindo as fotos e acompanhando as novas publicações.</p>
-              <span className="feature-state">Planejado</span>
-            </article>
-          </div>
+          {activeTab === 'galeria' && (
+            <div className="stage-gallery-section">
+              <div className="stage-section-title-row">
+                <div><span className="section-kicker">SUAS LEMBRANÇAS</span><h2>Minhas fotos</h2><p>{guest ? `Fotos compartilhadas por ${guest.name}.` : 'Cadastre-se para ver e gerenciar as fotos da sua sessão.'}</p></div>
+                {guest && <button className="stage-secondary-button" type="button" onClick={loadMyPhotos}><RefreshCw size={15} /> Atualizar</button>}
+              </div>
+              {guest ? <PhotoGrid photos={myPhotos} emptyTitle="Sua galeria está esperando" emptyDescription="Tire sua primeira foto para começar a guardar os momentos deste dia." onDelete={handleDeletePhoto} /> : (
+                <div className="stage-empty"><span className="stage-empty-icon"><UserRound size={26} /></span><h3>Entre para ver suas fotos</h3><p>O cadastro associa cada foto à sua sessão neste navegador.</p><button className="button button-primary" type="button" onClick={() => setActiveTab('participar')}>Participar agora</button></div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'story' && (
+            <div className="stage-gallery-section">
+              <div className="stage-section-title-row">
+                <div><span className="section-kicker">MEMÓRIAS COMPARTILHADAS</span><h2>Story do casamento</h2><p>As fotos publicadas pelos convidados, reunidas em um só lugar.</p></div>
+                <button className="stage-secondary-button" type="button" onClick={loadStories}><RefreshCw size={15} /> Atualizar</button>
+              </div>
+              {storiesError ? <div className="stage-inline-error"><AlertCircle size={18} /><span>{storiesError}</span></div> : (
+                <PhotoGrid photos={stories} emptyTitle="Ainda não há fotos publicadas" emptyDescription="Assim que os convidados compartilharem as primeiras lembranças, elas aparecerão aqui." />
+              )}
+            </div>
+          )}
         </section>
       </main>
 
-      <footer className="footer">
+      <footer className="footer stage-footer">
         <div className="section-wrap footer-inner">
-          <a className="brand footer-brand" href="#inicio">
-            <span className="brand-mark"><Heart size={16} strokeWidth={1.8} /></span>
-            <span className="brand-name">nosso<span>story</span></span>
-          </a>
-          <span>Uma história compartilhada começa com um momento.</span>
-          <span className="footer-version">BASE INICIAL · V0.1.0</span>
+          <a className="brand footer-brand" href="#inicio" onClick={() => setActiveTab('participar')}><span className="brand-mark"><Heart size={16} /></span><span className="brand-name">nosso<span>story</span></span></a>
+          <span>Uma foto, uma lembrança, uma história inteira.</span>
+          <span className="footer-version">VERSÃO 0.2 · CADASTRO E FOTOS</span>
         </div>
       </footer>
+    </div>
+  );
+}
+
+function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
+  const videoRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const streamRef = useRef(null);
+  const [stream, setStream] = useState(null);
+  const [cameraBusy, setCameraBusy] = useState(false);
+  const [cameraError, setCameraError] = useState('');
+  const [capturedImage, setCapturedImage] = useState('');
+  const [filterKey, setFilterKey] = useState('natural');
+  const [caption, setCaption] = useState('');
+  const [emoji, setEmoji] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [facingMode, setFacingMode] = useState('user');
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    setStream(null);
+    setCameraBusy(false);
+  }, []);
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [stream]);
+
+  useEffect(() => () => {
+    if (streamRef.current) streamRef.current.getTracks().forEach((track) => track.stop());
+  }, []);
+
+  const startCamera = async (mode = facingMode) => {
+    setCameraError('');
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError('Este navegador não disponibiliza a câmera. Abra a página por HTTPS ou escolha uma foto do dispositivo.');
+      return;
+    }
+    stopCamera();
+    setCameraBusy(true);
+    try {
+      const nextStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: mode }, width: { ideal: 1600 }, height: { ideal: 1200 } },
+      });
+      streamRef.current = nextStream;
+      setStream(nextStream);
+    } catch (error) {
+      setCameraError(error.name === 'NotAllowedError'
+        ? 'O acesso à câmera foi bloqueado. Libere a permissão nas configurações do navegador e tente novamente.'
+        : 'Não foi possível abrir a câmera neste dispositivo. Você também pode escolher uma foto da galeria.');
+    } finally {
+      setCameraBusy(false);
+    }
+  };
+
+  const capturePhoto = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      setCameraError('A câmera ainda está iniciando. Aguarde um instante e tente novamente.');
+      return;
+    }
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, 1600 / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    const context = canvas.getContext('2d');
+    if (!context) {
+      setCameraError('Não foi possível capturar a imagem neste navegador.');
+      return;
+    }
+    if (facingMode === 'user') {
+      context.translate(canvas.width, 0);
+      context.scale(-1, 1);
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    setCapturedImage(canvas.toDataURL('image/jpeg', 0.9));
+    setCameraError('');
+    stopCamera();
+  };
+
+  const handleChooseFile = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setCameraError('Selecione um arquivo de imagem.');
+      event.target.value = '';
+      return;
+    }
+    if (file.size > 15 * 1024 * 1024) {
+      setCameraError('A imagem selecionada deve ter no máximo 15 MB antes da edição.');
+      event.target.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setCapturedImage(String(reader.result));
+      setCameraError('');
+      stopCamera();
+    };
+    reader.onerror = () => setCameraError('Não foi possível ler a imagem selecionada.');
+    reader.readAsDataURL(file);
+    event.target.value = '';
+  };
+
+  const handlePublish = async () => {
+    if (!capturedImage) return;
+    setUploading(true);
+    setCameraError('');
+    try {
+      const blob = await createEditedJpeg(capturedImage, filterKey, caption, emoji);
+      const params = new URLSearchParams({ filter: filterKey, caption: caption.slice(0, 100), emoji: emoji.slice(0, 16) });
+      await readApiResponse(await fetch(`/api/photos?${params.toString()}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'image/jpeg', Accept: 'application/json' },
+        body: blob,
+      }));
+      setCapturedImage('');
+      setCaption('');
+      setEmoji('');
+      setFilterKey('natural');
+      await onUploaded();
+    } catch (error) {
+      setCameraError(error.message);
+      if (error.status === 401) setGlobalMessage({ type: 'error', text: 'Sua sessão expirou. Faça o cadastro novamente neste navegador.' });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="stage-camera-layout">
+      <div className="stage-camera-copy">
+        <span className="section-kicker">OLÁ, {guest.name.toLocaleUpperCase('pt-BR')}</span>
+        <h2>Vamos guardar<br />esse momento?</h2>
+        <p>Abra a câmera, tire uma foto e personalize com uma cor, uma mensagem ou um emoji antes de compartilhar.</p>
+        <div className="stage-camera-steps">
+          <span><b>1</b> Capture</span><span><b>2</b> Personalize</span><span><b>3</b> Publique</span>
+        </div>
+        <div className="stage-reassurance"><ShieldCheck size={17} /><span>Você pode excluir sua foto da galeria depois.</span></div>
+      </div>
+
+      <div className="stage-studio-card">
+        {!capturedImage ? (
+          <>
+            <div className={`stage-camera-view ${stream ? 'camera-is-live' : ''}`}>
+              {stream ? <video ref={videoRef} className={`stage-camera-video ${facingMode === 'user' ? 'video-selfie' : ''}`} playsInline muted autoPlay /> : (
+                <div className="stage-camera-placeholder"><span className="stage-camera-big-icon"><Camera size={32} /></span><strong>Sua próxima lembrança começa aqui</strong><span>Permita o acesso à câmera quando o navegador solicitar.</span></div>
+              )}
+              {stream && <div className="stage-camera-live-label"><span /> CÂMERA ATIVA</div>}
+            </div>
+            {cameraError && <div className="stage-inline-error"><AlertCircle size={16} /><span>{cameraError}</span></div>}
+            <div className="stage-camera-controls">
+              {!stream ? (
+                <button className="button button-primary stage-capture-button" type="button" onClick={() => startCamera()} disabled={cameraBusy}>
+                  {cameraBusy ? <LoaderCircle size={18} className="spin" /> : <Camera size={18} />}
+                  {cameraBusy ? 'Abrindo câmera...' : 'Abrir câmera'}
+                </button>
+              ) : (
+                <>
+                  <button className="button button-primary stage-capture-button" type="button" onClick={capturePhoto}><Camera size={18} /> Tirar foto</button>
+                  <button className="stage-secondary-button" type="button" onClick={() => { const next = facingMode === 'user' ? 'environment' : 'user'; setFacingMode(next); startCamera(next); }}>Trocar câmera</button>
+                  <button className="stage-icon-button" type="button" onClick={stopCamera} aria-label="Fechar câmera"><CameraOff size={17} /></button>
+                </>
+              )}
+              <span className="stage-control-separator">ou</span>
+              <button type="button" className="stage-secondary-button" onClick={() => fileInputRef.current?.click()}><ImageIcon size={16} /> Escolher foto</button>
+              <input ref={fileInputRef} type="file" accept="image/*" capture="environment" className="stage-visually-hidden" onChange={handleChooseFile} />
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="stage-preview-header"><div><span className="section-kicker">PRÉ-VISUALIZAÇÃO</span><h3>Gostou do resultado?</h3></div><button className="stage-icon-button" type="button" onClick={() => setCapturedImage('')} aria-label="Cancelar edição"><X size={17} /></button></div>
+            <div className="stage-photo-preview">
+              <img src={capturedImage} alt="Prévia da fotografia" style={{ filter: (FILTERS.find((item) => item.key === filterKey) || FILTERS[0]).css }} />
+              {(caption.trim() || emoji) && <div className="stage-preview-overlay"><span>{emoji}</span>{caption.trim() && <p>{caption.trim()}</p>}</div>}
+            </div>
+            <div className="stage-filter-row" aria-label="Filtros da fotografia">
+              {FILTERS.map((filter) => (
+                <button key={filter.key} type="button" className={`stage-filter-chip ${filterKey === filter.key ? 'selected' : ''}`} onClick={() => setFilterKey(filter.key)}>
+                  <span className="stage-filter-swatch" style={{ filter: filter.css }}><img src={capturedImage} alt="" /></span>{filter.label}
+                </button>
+              ))}
+            </div>
+            <label className="stage-field-label" htmlFor="photo-caption">Mensagem na foto <span className="optional">(opcional)</span></label>
+            <textarea id="photo-caption" className="stage-input stage-caption-input" maxLength={100} rows={2} value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Uma lembrança para guardar..." />
+            <div className="stage-emoji-label">Escolha um emoji</div>
+            <div className="stage-emoji-row">
+              {EMOJIS.map((item) => <button key={item} type="button" className={`stage-emoji-button ${emoji === item ? 'selected' : ''}`} onClick={() => setEmoji(emoji === item ? '' : item)} aria-label={`Adicionar emoji ${item}`}>{item}</button>)}
+            </div>
+            {cameraError && <div className="stage-inline-error"><AlertCircle size={16} /><span>{cameraError}</span></div>}
+            <div className="stage-preview-actions">
+              <button className="stage-secondary-button" type="button" onClick={() => { setCapturedImage(''); setCaption(''); setEmoji(''); setCameraError(''); }} disabled={uploading}><X size={15} /> Cancelar</button>
+              <button className="button button-primary stage-publish-button" type="button" onClick={handlePublish} disabled={uploading}>
+                {uploading ? <><LoaderCircle size={17} className="spin" /> Enviando...</> : <><Send size={16} /> Publicar foto</>}
+              </button>
+            </div>
+            <p className="stage-privacy-note">A foto editada será salva na sua galeria e exibida no story compartilhado.</p>
+          </>
+        )}
+      </div>
     </div>
   );
 }
