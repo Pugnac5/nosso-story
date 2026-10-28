@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import guestsRouter from './routes/guests.routes.js';
 import photosRouter from './routes/photos.routes.js';
+import adminRouter from './routes/admin.routes.js';
+import settingsRouter from './routes/settings.routes.js';
 import { isSupabaseConfigured } from './lib/supabase.js';
 
 const app = express();
@@ -26,6 +28,8 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/guests', guestsRouter);
 app.use('/api/photos', photosRouter);
+app.use('/api/settings', settingsRouter);
+app.use('/api/admin', adminRouter);
 
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Endpoint da API não encontrado.' });
@@ -33,7 +37,8 @@ app.use('/api', (_req, res) => {
 
 app.use((error, req, res, _next) => {
   if (error?.type === 'entity.too.large' || error?.status === 413) {
-    return res.status(413).json({ error: 'A imagem é muito grande. O limite é 8 MB.' });
+    const isLogoUpload = req.path.startsWith('/api/admin/logo');
+    return res.status(413).json({ error: isLogoUpload ? 'O logo deve ter no máximo 2 MB.' : 'A imagem é muito grande. O limite é 8 MB.' });
   }
   if (error?.type === 'entity.parse.failed') {
     return res.status(400).json({ error: 'O corpo da requisição contém JSON inválido.' });

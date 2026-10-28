@@ -34,6 +34,13 @@ router.post('/', requireGuestSession(), async (req, res, next) => {
         : 'natural';
       const supabase = getSupabaseAdmin();
       const bucket = getStorageBucketName();
+      const { data: appSettings, error: settingsError } = await supabase
+        .from('app_settings')
+        .select('auto_publish')
+        .eq('id', true)
+        .maybeSingle();
+      if (settingsError) throw settingsError;
+      const photoStatus = appSettings?.auto_publish === false ? 'pending' : 'published';
       const storagePath = `${req.guest.id}/${randomUUID()}.jpg`;
 
       const { error: uploadError } = await supabase.storage
@@ -60,7 +67,7 @@ router.post('/', requireGuestSession(), async (req, res, next) => {
           caption: caption || null,
           emoji: emoji || null,
           filter_key: filterKey,
-          status: 'published',
+          status: photoStatus,
         })
         .select('id, storage_path, caption, emoji, filter_key, status, created_at')
         .single();
@@ -76,7 +83,10 @@ router.post('/', requireGuestSession(), async (req, res, next) => {
         .createSignedUrl(storagePath, 60 * 60 * 24);
       if (signedError) console.error('Foto salva, mas não foi possível gerar URL temporária:', signedError.message);
 
-      return res.status(201).json({ photo: { ...photo, url: signed?.signedUrl ?? null } });
+      return res.status(201).json({
+        photo: { ...photo, url: signed?.signedUrl ?? null },
+        message: photoStatus === 'published' ? 'Foto publicada.' : 'Foto enviada e aguardando aprovação do organizador.',
+      });
     } catch (error) {
       return next(error);
     }

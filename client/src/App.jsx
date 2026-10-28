@@ -8,6 +8,8 @@ import {
   Image as ImageIcon,
   LoaderCircle,
   LogOut,
+  Monitor,
+  QrCode,
   RefreshCw,
   Send,
   ShieldCheck,
@@ -17,6 +19,11 @@ import {
   UsersRound,
   X,
 } from 'lucide-react';
+import StoryViewer from './pages/StoryViewer.jsx';
+import AdminPage from './pages/AdminPage.jsx';
+import SlideshowPage from './pages/SlideshowPage.jsx';
+import QrPage from './pages/QrPage.jsx';
+import { useEventSettings } from './lib/useEventSettings.js';
 
 const FILTERS = [
   { key: 'natural', label: 'Original', css: 'none', canvas: 'none' },
@@ -133,7 +140,7 @@ async function createEditedJpeg(dataUrl, filterKey, caption, emoji) {
   return blob;
 }
 
-function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete }) {
+function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete, onOpen, layout = 'grid' }) {
   if (!photos.length) {
     return (
       <div className="stage-empty">
@@ -145,11 +152,13 @@ function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete }) {
   }
 
   return (
-    <div className="stage-photo-grid">
+    <div className={`stage-photo-grid ${layout === 'compact' ? 'stage-photo-grid-compact' : ''}`}>
       {photos.map((photo) => (
         <article className="stage-photo-card" key={photo.id}>
           {photo.url ? (
-            <img className="stage-photo-img" src={photo.url} alt={photo.caption || 'Foto do casamento'} loading="lazy" />
+            <button className="stage-photo-open-button" type="button" onClick={() => onOpen?.(photo)} aria-label={`Abrir foto de ${photo.guest_name || 'convidado'}`}>
+              <img className="stage-photo-img" src={photo.url} alt={photo.caption || 'Foto do casamento'} loading="lazy" />
+            </button>
           ) : (
             <div className="stage-photo-unavailable"><ImageIcon size={24} /><span>Prévia indisponível</span></div>
           )}
@@ -159,6 +168,7 @@ function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete }) {
               {photo.caption && <p>{photo.caption}</p>}
             </div>
           )}
+          {photo.status === 'pending' && <span className="stage-photo-pending-label">Aguardando aprovação</span>}
           <div className="stage-photo-meta">
             <span>{new Date(photo.created_at).toLocaleDateString('pt-BR')}</span>
             {onDelete && (
@@ -173,10 +183,11 @@ function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete }) {
   );
 }
 
-function App() {
+function GuestApp() {
+  const { settings: eventSettings, refreshSettings } = useEventSettings();
   const [health, setHealth] = useState({ state: 'checking', supabaseConfigured: false });
   const [guest, setGuest] = useState(null);
-  const [activeTab, setActiveTab] = useState('participar');
+  const [activeTab, setActiveTab] = useState(() => window.location.pathname.replace(/\/+$/, '') === '/story' ? 'story' : 'participar');
   const [name, setName] = useState('');
   const [whatsapp, setWhatsapp] = useState('');
   const [nameStatus, setNameStatus] = useState('idle');
@@ -186,6 +197,11 @@ function App() {
   const [stories, setStories] = useState([]);
   const [loadingPhotos, setLoadingPhotos] = useState(false);
   const [storiesError, setStoriesError] = useState('');
+  const [viewerPhotoId, setViewerPhotoId] = useState(null);
+  const [viewerSource, setViewerSource] = useState('story');
+  const viewerPhotos = viewerSource === 'story' ? stories : myPhotos;
+  const closePhotoViewer = useCallback(() => setViewerPhotoId(null), []);
+  const movePhotoViewer = useCallback((photo) => setViewerPhotoId(photo.id), []);
 
   const loadHealth = useCallback(async () => {
     try {
@@ -228,7 +244,7 @@ function App() {
       .then((data) => {
         if (ignore || !data?.guest) return;
         setGuest(data.guest);
-        setActiveTab('participar');
+        if (window.location.pathname.replace(/\/+$/, '') !== '/story') setActiveTab('participar');
       })
       .catch(() => {})
       .finally(() => {
@@ -240,6 +256,13 @@ function App() {
   useEffect(() => {
     if (guest) loadMyPhotos();
   }, [guest, loadMyPhotos]);
+
+  useEffect(() => {
+    if (activeTab !== 'story') return undefined;
+    const interval = Math.max(5, Number(eventSettings.story_refresh_seconds) || 10) * 1000;
+    const timer = window.setInterval(() => { loadStories(); refreshSettings(); }, interval);
+    return () => window.clearInterval(timer);
+  }, [activeTab, eventSettings.story_refresh_seconds, loadStories, refreshSettings]);
 
   useEffect(() => {
     const trimmed = name.trim().replace(/\s+/g, ' ');
@@ -331,10 +354,10 @@ function App() {
     <div className="app-shell stage-shell">
       <header className="topbar stage-topbar">
         <a className="brand" href="#inicio" aria-label="Nosso Story, início" onClick={() => setActiveTab('participar')}>
-          <span className="brand-mark"><Heart size={19} strokeWidth={1.8} /></span>
+          <span className="brand-mark">{eventSettings.logo_url ? <img className="stage-logo-image" src={eventSettings.logo_url} alt="Logo do evento" /> : <Heart size={19} strokeWidth={1.8} />}</span>
           <span className="brand-name">nosso<span>story</span></span>
         </a>
-        <div className="topbar-note"><span className="topbar-dot" /> UMA HISTÓRIA FEITA POR TODOS NÓS</div>
+        <div className="topbar-note"><span className="topbar-dot" /> {eventSettings.couple_names || 'UMA HISTÓRIA FEITA POR TODOS NÓS'}</div>
         {guest ? (
           <button className="stage-account-button" type="button" onClick={handleLogout} title="Encerrar sessão">
             <UserRound size={16} /><span>{guest.name}</span><LogOut size={14} />
@@ -347,7 +370,7 @@ function App() {
       <main className="stage-main" id="inicio">
         <section className="stage-welcome">
           <div>
-            <span className="eyebrow"><Sparkles size={14} /> CADA OLHAR CONTA UMA HISTÓRIA</span>
+            <span className="eyebrow"><Sparkles size={14} /> {eventSettings.couple_names || 'CADA OLHAR CONTA UMA HISTÓRIA'}</span>
             <h1>O grande dia,<br />do jeito que <span>vocês viveram.</span></h1>
             <p>Registre os momentos espontâneos, escreva uma mensagem e compartilhe a lembrança com todos os convidados.</p>
           </div>
@@ -441,9 +464,14 @@ function App() {
           {activeTab === 'participar' && guest && (
             <CameraStudio
               guest={guest}
-              onUploaded={async () => {
+              onUploaded={async (photo) => {
                 await Promise.all([loadMyPhotos(), loadStories()]);
-                setMessage({ type: 'success', text: 'Foto publicada! Ela já está na sua galeria e no story do casamento.' });
+                setMessage({
+                  type: 'success',
+                  text: photo?.status === 'pending'
+                    ? 'Foto enviada! Ela ficará na sua galeria e aparecerá no story após a aprovação do organizador.'
+                    : 'Foto publicada! Ela já está na sua galeria e no story do casamento.',
+                });
               }}
               setGlobalMessage={setMessage}
             />
@@ -455,7 +483,7 @@ function App() {
                 <div><span className="section-kicker">SUAS LEMBRANÇAS</span><h2>Minhas fotos</h2><p>{guest ? `Fotos compartilhadas por ${guest.name}.` : 'Cadastre-se para ver e gerenciar as fotos da sua sessão.'}</p></div>
                 {guest && <button className="stage-secondary-button" type="button" onClick={loadMyPhotos}><RefreshCw size={15} /> Atualizar</button>}
               </div>
-              {guest ? <PhotoGrid photos={myPhotos} emptyTitle="Sua galeria está esperando" emptyDescription="Tire sua primeira foto para começar a guardar os momentos deste dia." onDelete={handleDeletePhoto} /> : (
+              {guest ? <PhotoGrid photos={myPhotos} emptyTitle="Sua galeria está esperando" emptyDescription="Tire sua primeira foto para começar a guardar os momentos deste dia." onDelete={handleDeletePhoto} layout={eventSettings.gallery_layout} onOpen={(photo) => { setViewerSource('mine'); setViewerPhotoId(photo.id); }} /> : (
                 <div className="stage-empty"><span className="stage-empty-icon"><UserRound size={26} /></span><h3>Entre para ver suas fotos</h3><p>O cadastro associa cada foto à sua sessão neste navegador.</p><button className="button button-primary" type="button" onClick={() => setActiveTab('participar')}>Participar agora</button></div>
               )}
             </div>
@@ -464,22 +492,28 @@ function App() {
           {activeTab === 'story' && (
             <div className="stage-gallery-section">
               <div className="stage-section-title-row">
-                <div><span className="section-kicker">MEMÓRIAS COMPARTILHADAS</span><h2>Story do casamento</h2><p>As fotos publicadas pelos convidados, reunidas em um só lugar.</p></div>
-                <button className="stage-secondary-button" type="button" onClick={loadStories}><RefreshCw size={15} /> Atualizar</button>
+                <div><span className="section-kicker">MEMÓRIAS COMPARTILHADAS</span><h2>Story do casamento</h2><p>As fotos publicadas pelos convidados, reunidas em um só lugar. Atualiza automaticamente a cada {eventSettings.story_refresh_seconds || 10} segundos.</p></div>
+                <div className="stage-section-title-actions">
+                  <a className="stage-secondary-button" href="/telao"><Monitor size={15} /> Abrir telão</a>
+                  <a className="stage-secondary-button" href="/qr"><QrCode size={15} /> QR Code</a>
+                  <button className="stage-secondary-button" type="button" onClick={loadStories}><RefreshCw size={15} /> Atualizar</button>
+                </div>
               </div>
               {storiesError ? <div className="stage-inline-error"><AlertCircle size={18} /><span>{storiesError}</span></div> : (
-                <PhotoGrid photos={stories} emptyTitle="Ainda não há fotos publicadas" emptyDescription="Assim que os convidados compartilharem as primeiras lembranças, elas aparecerão aqui." />
+                <PhotoGrid photos={stories} emptyTitle="Ainda não há fotos publicadas" emptyDescription="Assim que os convidados compartilharem as primeiras lembranças, elas aparecerão aqui." layout={eventSettings.gallery_layout} onOpen={(photo) => { setViewerSource('story'); setViewerPhotoId(photo.id); }} />
               )}
             </div>
           )}
         </section>
       </main>
 
+      {viewerPhotoId && <StoryViewer photos={viewerPhotos} activeId={viewerPhotoId} onClose={closePhotoViewer} onMove={movePhotoViewer} />}
+
       <footer className="footer stage-footer">
         <div className="section-wrap footer-inner">
           <a className="brand footer-brand" href="#inicio" onClick={() => setActiveTab('participar')}><span className="brand-mark"><Heart size={16} /></span><span className="brand-name">nosso<span>story</span></span></a>
           <span>Uma foto, uma lembrança, uma história inteira.</span>
-          <span className="footer-version">VERSÃO 0.2 · CADASTRO E FOTOS</span>
+          <span className="footer-version">VERSÃO 0.3 · STORY, TELÃO E PAINEL MASTER</span>
         </div>
       </footer>
     </div>
@@ -600,7 +634,7 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
     try {
       const blob = await createEditedJpeg(capturedImage, filterKey, caption, emoji);
       const params = new URLSearchParams({ filter: filterKey, caption: caption.slice(0, 100), emoji: emoji.slice(0, 16) });
-      await readApiResponse(await fetch(`/api/photos?${params.toString()}`, {
+      const uploadResult = await readApiResponse(await fetch(`/api/photos?${params.toString()}`, {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'image/jpeg', Accept: 'application/json' },
@@ -610,7 +644,7 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
       setCaption('');
       setEmoji('');
       setFilterKey('natural');
-      await onUploaded();
+      await onUploaded(uploadResult.photo);
     } catch (error) {
       setCameraError(error.message);
       if (error.status === 401) setGlobalMessage({ type: 'error', text: 'Sua sessão expirou. Faça o cadastro novamente neste navegador.' });
@@ -692,6 +726,14 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
       </div>
     </div>
   );
+}
+
+function App() {
+  const path = window.location.pathname.replace(/\/+$/, '') || '/';
+  if (path === '/admin') return <AdminPage />;
+  if (path === '/telao') return <SlideshowPage />;
+  if (path === '/qr') return <QrPage />;
+  return <GuestApp />;
 }
 
 export default App;
