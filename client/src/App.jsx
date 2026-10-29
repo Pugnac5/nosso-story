@@ -147,6 +147,34 @@ async function createEditedJpeg(dataUrl, filterKey, caption, emoji) {
   return blob;
 }
 
+// Gera a versão limpa para impressão: preserva o filtro escolhido, mas não grava
+// legenda nem emoji sobre os pixels da fotografia.
+async function createPrintJpeg(dataUrl, filterKey) {
+  const image = await dataUrlToImage(dataUrl);
+  const maxDimension = 2400;
+  const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Seu navegador não conseguiu preparar a versão para impressão.');
+
+  const filter = FILTERS.find((item) => item.key === filterKey) || FILTERS[0];
+  context.filter = filter.canvas;
+  context.drawImage(image, 0, 0, width, height);
+  context.filter = 'none';
+
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('Não foi possível preparar a versão limpa para impressão.'))), 'image/jpeg', 0.9);
+  });
+  if (blob.size > 8 * 1024 * 1024) {
+    throw new Error('A versão para impressão excedeu 8 MB. Escolha uma imagem menor e tente novamente.');
+  }
+  return blob;
+}
+
 function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete, onOpen, layout = 'grid' }) {
   if (!photos.length) {
     return (
@@ -477,9 +505,9 @@ function GuestApp() {
       <main className="stage-main" id="inicio">
         <section className="stage-welcome">
           <div>
-            <span className="eyebrow"><Sparkles size={14} /> {eventSettings.couple_names || 'CADA OLHAR CONTA UMA HISTÓRIA'}</span>
-            <h1>O grande dia,<br />do jeito que <span>vocês viveram.</span></h1>
-            <p>Registre os momentos espontâneos, escreva uma mensagem e compartilhe a lembrança com todos os convidados.</p>
+            <span className="eyebrow"><Sparkles size={14} /> {eventSettings.event_tagline || 'CADA OLHAR CONTA UMA HISTÓRIA'}</span>
+            <h1>{eventSettings.hero_title || 'O grande dia,'}<br /><span>{eventSettings.hero_highlight || 'do jeito que vocês viveram.'}</span></h1>
+            <p>{eventSettings.hero_description || 'Registre os momentos espontâneos, escreva uma mensagem e compartilhe a lembrança com todos os convidados.'}</p>
           </div>
           <div className="stage-health-card">
             <div className="stage-health-heading">
@@ -516,15 +544,15 @@ function GuestApp() {
             <div className="stage-register-layout">
               <div className="stage-section-copy">
                 <span className="section-kicker">SEU LUGAR NESSA HISTÓRIA</span>
-                <h2>Vamos começar<br />pelo seu nome.</h2>
-                <p>O cadastro é rapidinho. Seu nome identifica as fotos que você compartilhar; o WhatsApp é obrigatório para permitir a recuperação do acesso e nunca será exibido publicamente.</p>
+                <h2 style={{ whiteSpace: 'pre-line' }}>{eventSettings.registration_title || 'Vamos começar pelo seu nome.'}</h2>
+                <p>{eventSettings.registration_description || 'O cadastro é rapidinho. Seu nome identifica as fotos que você compartilhar; o WhatsApp é obrigatório para permitir a recuperação do acesso e nunca será exibido publicamente.'}</p>
                 <div className="stage-reassurance"><ShieldCheck size={17} /><span>Suas informações de contato ficam privadas.</span></div>
               </div>
               {!recoveryMode ? (
               <form className="stage-form-card" onSubmit={handleRegister}>
                 <div className="stage-form-heading">
                   <span className="stage-form-icon"><Heart size={20} /></span>
-                  <div><h3>Participar do casamento</h3><p>Preencha os campos abaixo para liberar a câmera.</p></div>
+                  <div><h3>{eventSettings.registration_form_title || 'Participar do casamento'}</h3><p>{eventSettings.registration_form_description || 'Preencha os campos abaixo para liberar a câmera.'}</p></div>
                 </div>
                 <button
                   className="guest-recovery-entry"
@@ -666,8 +694,8 @@ function GuestApp() {
       <footer className="footer stage-footer">
         <div className="section-wrap footer-inner">
           <a className="brand footer-brand" href="#inicio" onClick={() => setActiveTab('participar')}><span className="brand-mark"><Heart size={16} /></span><span className="brand-name">nosso<span>story</span></span></a>
-          <span>Uma foto, uma lembrança, uma história inteira.</span>
-          <span className="footer-version">VERSÃO 0.4 · SESSÕES, UPLOAD RESILIENTE E SINCRONIZAÇÃO</span>
+          <span>{eventSettings.footer_text || 'Uma foto, uma lembrança, uma história inteira.'}</span>
+          <span className="footer-version">NOSSO STORY · MEMÓRIAS COMPARTILHADAS</span>
         </div>
       </footer>
     </div>
@@ -687,7 +715,9 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
   const [emoji, setEmoji] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadFailed, setUploadFailed] = useState(false);
+  const [printSourcePending, setPrintSourcePending] = useState(false);
   const uploadIdRef = useRef(null);
+  const pendingPrintSourceRef = useRef(null);
   const [facingMode, setFacingMode] = useState('user');
 
   const stopCamera = useCallback(() => {
@@ -793,36 +823,64 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
     setUploadFailed(false);
     setCameraError('');
     try {
-      const blob = await createEditedJpeg(capturedImage, filterKey, caption, emoji);
-      const params = new URLSearchParams({ filter: filterKey, caption: caption.slice(0, 100), emoji: emoji.slice(0, 16) });
-      if (!uploadIdRef.current) {
-        uploadIdRef.current = typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
-            const random = Math.floor(Math.random() * 16);
-            return (char === 'x' ? random : (random & 0x3) | 0x8).toString(16);
-          });
+      let photo;
+      let printBlob;
+
+      // Se a foto já foi publicada mas o original limpo falhou, a nova tentativa
+      // envia somente a versão de impressão. Isso evita criar uma segunda publicação.
+      if (pendingPrintSourceRef.current) {
+        ({ photo, blob: printBlob } = pendingPrintSourceRef.current);
+      } else {
+        const storyBlob = await createEditedJpeg(capturedImage, filterKey, caption, emoji);
+        printBlob = await createPrintJpeg(capturedImage, filterKey);
+        const params = new URLSearchParams({ filter: filterKey, caption: caption.slice(0, 100), emoji: emoji.slice(0, 16) });
+        if (!uploadIdRef.current) {
+          uploadIdRef.current = typeof crypto !== 'undefined' && crypto.randomUUID
+            ? crypto.randomUUID()
+            : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+              const random = Math.floor(Math.random() * 16);
+              return (char === 'x' ? random : (random & 0x3) | 0x8).toString(16);
+            });
+        }
+        const uploadResult = await readApiResponse(await fetchWithRetry(`/api/photos?${params.toString()}`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'image/jpeg',
+            Accept: 'application/json',
+            'Idempotency-Key': uploadIdRef.current,
+          },
+          body: storyBlob,
+        }, { retries: 2, baseDelayMs: 650, maxDelayMs: 3000 }));
+        photo = uploadResult.photo;
+        pendingPrintSourceRef.current = { photo, blob: printBlob };
+        setPrintSourcePending(true);
       }
-      const uploadResult = await readApiResponse(await fetchWithRetry(`/api/photos?${params.toString()}`, {
+
+      await readApiResponse(await fetchWithRetry(`/api/photos/${encodeURIComponent(photo.id)}/print-source`, {
         method: 'POST',
         credentials: 'same-origin',
         headers: {
           'Content-Type': 'image/jpeg',
           Accept: 'application/json',
-          'Idempotency-Key': uploadIdRef.current,
         },
-        body: blob,
+        body: printBlob,
       }, { retries: 2, baseDelayMs: 650, maxDelayMs: 3000 }));
+
+      pendingPrintSourceRef.current = null;
+      setPrintSourcePending(false);
       setCapturedImage('');
       setCaption('');
       setEmoji('');
       setFilterKey('natural');
       setUploadFailed(false);
       uploadIdRef.current = null;
-      await onUploaded(uploadResult.photo);
+      await onUploaded(photo);
     } catch (error) {
       setUploadFailed(true);
-      setCameraError(error.message || 'Não foi possível enviar a foto. Ela continua nesta tela; tente novamente.');
+      setCameraError(pendingPrintSourceRef.current
+        ? 'A foto já foi publicada, mas a versão limpa para impressão não foi salva. Clique em “Tentar salvar versão para impressão”.'
+        : (error.message || 'Não foi possível enviar a foto. Ela continua nesta tela; tente novamente.'));
       if (error.status === 401) setGlobalMessage({ type: 'error', text: 'Sua sessão expirou. Recupere o acesso pelo telefone usado no cadastro.' });
     } finally {
       setUploading(false);
@@ -871,32 +929,32 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
           </>
         ) : (
           <>
-            <div className="stage-preview-header"><div><span className="section-kicker">PRÉ-VISUALIZAÇÃO</span><h3>Gostou do resultado?</h3></div><button className="stage-icon-button" type="button" onClick={() => { setCapturedImage(''); uploadIdRef.current = null; setUploadFailed(false); setCameraError(''); }} aria-label="Cancelar edição" disabled={uploading}><X size={17} /></button></div>
+            <div className="stage-preview-header"><div><span className="section-kicker">PRÉ-VISUALIZAÇÃO</span><h3>Gostou do resultado?</h3></div><button className="stage-icon-button" type="button" onClick={() => { setCapturedImage(''); uploadIdRef.current = null; setUploadFailed(false); setCameraError(''); }} aria-label="Cancelar edição" disabled={uploading || printSourcePending}><X size={17} /></button></div>
             <div className="stage-photo-preview">
               <img src={capturedImage} alt="Prévia da fotografia" style={{ filter: (FILTERS.find((item) => item.key === filterKey) || FILTERS[0]).css }} />
               {(caption.trim() || emoji) && <div className="stage-preview-overlay"><span>{emoji}</span>{caption.trim() && <p>{caption.trim()}</p>}</div>}
             </div>
             <div className="stage-filter-row" aria-label="Filtros da fotografia">
               {FILTERS.map((filter) => (
-                <button key={filter.key} type="button" className={`stage-filter-chip ${filterKey === filter.key ? 'selected' : ''}`} disabled={uploading} onClick={() => { if (uploadFailed && filterKey !== filter.key) uploadIdRef.current = null; setFilterKey(filter.key); setUploadFailed(false); }}>
+                <button key={filter.key} type="button" className={`stage-filter-chip ${filterKey === filter.key ? 'selected' : ''}`} disabled={uploading || printSourcePending} onClick={() => { if (uploadFailed && filterKey !== filter.key) uploadIdRef.current = null; setFilterKey(filter.key); setUploadFailed(false); }}>
                   <span className="stage-filter-swatch" style={{ filter: filter.css }}><img src={capturedImage} alt="" /></span>{filter.label}
                 </button>
               ))}
             </div>
             <label className="stage-field-label" htmlFor="photo-caption">Mensagem na foto <span className="optional">(opcional)</span></label>
-            <textarea id="photo-caption" className="stage-input stage-caption-input" maxLength={100} rows={2} value={caption} disabled={uploading} onChange={(event) => { if (uploadFailed) uploadIdRef.current = null; setCaption(event.target.value); setUploadFailed(false); }} placeholder="Uma lembrança para guardar..." />
+            <textarea id="photo-caption" className="stage-input stage-caption-input" maxLength={100} rows={2} value={caption} disabled={uploading || printSourcePending} onChange={(event) => { if (uploadFailed && !printSourcePending) uploadIdRef.current = null; setCaption(event.target.value); setUploadFailed(false); }} placeholder="Uma lembrança para guardar..." />
             <div className="stage-emoji-label">Escolha um emoji</div>
             <div className="stage-emoji-row">
-              {EMOJIS.map((item) => <button key={item} type="button" className={`stage-emoji-button ${emoji === item ? 'selected' : ''}`} disabled={uploading} onClick={() => { if (uploadFailed) uploadIdRef.current = null; setEmoji(emoji === item ? '' : item); setUploadFailed(false); }} aria-label={`Adicionar emoji ${item}`}>{item}</button>)}
+              {EMOJIS.map((item) => <button key={item} type="button" className={`stage-emoji-button ${emoji === item ? 'selected' : ''}`} disabled={uploading || printSourcePending} onClick={() => { if (uploadFailed && !printSourcePending) uploadIdRef.current = null; setEmoji(emoji === item ? '' : item); setUploadFailed(false); }} aria-label={`Adicionar emoji ${item}`}>{item}</button>)}
             </div>
             {cameraError && <div className="stage-inline-error"><AlertCircle size={16} /><span>{cameraError}</span></div>}
             <div className="stage-preview-actions">
-              <button className="stage-secondary-button" type="button" onClick={() => { setCapturedImage(''); setCaption(''); setEmoji(''); setCameraError(''); setUploadFailed(false); uploadIdRef.current = null; }} disabled={uploading}><X size={15} /> Cancelar</button>
+              <button className="stage-secondary-button" type="button" onClick={() => { setCapturedImage(''); setCaption(''); setEmoji(''); setCameraError(''); setUploadFailed(false); uploadIdRef.current = null; }} disabled={uploading || printSourcePending}><X size={15} /> Cancelar</button>
               <button className="button button-primary stage-publish-button" type="button" onClick={handlePublish} disabled={uploading}>
-                {uploading ? <><LoaderCircle size={17} className="spin" /> Enviando...</> : uploadFailed ? <><RefreshCw size={16} /> Tentar novamente</> : <><Send size={16} /> Publicar foto</>}
+                {uploading ? <><LoaderCircle size={17} className="spin" /> Enviando...</> : uploadFailed && printSourcePending ? <><RefreshCw size={16} /> Tentar salvar versão para impressão</> : uploadFailed ? <><RefreshCw size={16} /> Tentar novamente</> : <><Send size={16} /> Publicar foto</>}
               </button>
             </div>
-            <p className="stage-privacy-note">A foto editada será salva na sua galeria e exibida no story compartilhado.</p>
+            <p className="stage-privacy-note">A versão com legenda e emoji aparece no story. Uma segunda versão limpa, sem sobreposições, será guardada para impressão.</p>
           </>
         )}
       </div>

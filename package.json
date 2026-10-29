@@ -1,8 +1,8 @@
 {
   "name": "nosso-story",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "private": true,
-  "description": "Compartilhamento de fotos para casamento com recuperação de sessão, uploads idempotentes e sincronização resiliente.",
+  "description": "Casamento com galeria compartilhada, impressão em lote de fotos e identidade visual configurável pelo painel master.",
   "engines": {
     "node": ">=22.12.0 <25.0.0"
   },

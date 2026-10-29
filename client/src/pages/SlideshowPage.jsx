@@ -138,7 +138,7 @@ export default function SlideshowPage() {
           <button type="button" className="slideshow-play-button" onClick={() => setPlaying((value) => !value)} aria-label={playing ? 'Pausar apresentação' : 'Retomar apresentação'}>{playing ? <Pause size={18} /> : <Play size={18} />}</button>
           <button type="button" onClick={() => go(1)} disabled={photos.length < 2} aria-label="Próxima foto"><ChevronRight size={20} /></button>
         </div>
-        <div className="slideshow-interval"><Heart size={14} /> Uma história feita por todos nós <span>· {settings.slideshow_interval_seconds || 7}s por foto</span></div>
+        <div className="slideshow-interval"><Heart size={14} /> {settings.footer_text || 'Uma história feita por todos nós'} <span>· {settings.slideshow_interval_seconds || 7}s por foto</span></div>
       </footer>
     </main>
   );

@@ -158,6 +158,65 @@ router.post('/', requireGuestSession(), async (req, res, next) => {
   });
 });
 
+
+// Guarda a versão limpa da foto para impressão separadamente da versão do story.
+// O caminho deriva do ID da foto, tornando a operação idempotente em novas tentativas.
+router.post('/:photoId/print-source', requireGuestSession(), async (req, res, next) => {
+  const readJpeg = express.raw({ type: 'image/jpeg', limit: MAX_IMAGE_BYTES });
+  readJpeg(req, res, async (bodyError) => {
+    if (bodyError) return next(bodyError);
+
+    try {
+      const photoId = String(req.params.photoId || '');
+      if (!UUID_PATTERN.test(photoId)) {
+        return res.status(400).json({ error: 'Identificador de foto inválido.', code: 'PHOTO_INVALID_ID' });
+      }
+      if (!Buffer.isBuffer(req.body) || req.body.length < 4) {
+        return res.status(400).json({ error: 'Envie uma fotografia JPEG válida.', code: 'PHOTO_INVALID' });
+      }
+      if (req.body.length > MAX_IMAGE_BYTES) {
+        return res.status(413).json({ error: 'A versão para impressão deve ter no máximo 8 MB.', code: 'PHOTO_TOO_LARGE' });
+      }
+      if (req.body[0] !== 0xff || req.body[1] !== 0xd8 || req.body[2] !== 0xff || req.body[req.body.length - 2] !== 0xff || req.body[req.body.length - 1] !== 0xd9) {
+        return res.status(415).json({ error: 'O arquivo recebido não corresponde a uma imagem JPEG.', code: 'PHOTO_INVALID_TYPE' });
+      }
+
+      const supabase = getSupabaseAdmin();
+      if (!supabase) return res.status(503).json({ error: 'Supabase não configurado.', code: 'SUPABASE_NOT_CONFIGURED', retryable: true });
+      const { data: photo, error: findError } = await supabase
+        .from('photos')
+        .select('id, guest_id')
+        .eq('id', photoId)
+        .eq('guest_id', req.guest.id)
+        .maybeSingle();
+      if (findError) throw findError;
+      if (!photo) return res.status(404).json({ error: 'Foto não encontrada nesta galeria.' });
+
+      const bucket = getStorageBucketName();
+      const storagePath = `${req.guest.id}/${photoId}-print.jpg`;
+      const { error: uploadError } = await supabase.storage.from(bucket).upload(storagePath, req.body, {
+        contentType: 'image/jpeg',
+        cacheControl: '3600',
+        upsert: true,
+      });
+      if (uploadError) {
+        console.error('Falha ao salvar versão limpa para impressão:', uploadError.message);
+        return res.status(502).json({ error: 'A foto foi publicada, mas não conseguimos guardar a versão limpa para impressão. Tente novamente.', code: 'PRINT_SOURCE_UPLOAD_FAILED', retryable: true });
+      }
+
+      const { error: updateError } = await supabase
+        .from('photos')
+        .update({ print_storage_path: storagePath })
+        .eq('id', photoId)
+        .eq('guest_id', req.guest.id);
+      if (updateError) throw updateError;
+      return res.status(200).json({ status: 'ok', printSourceSaved: true });
+    } catch (error) {
+      return next(error);
+    }
+  });
+});
+
 router.get('/stories', async (_req, res, next) => {
   const supabase = getSupabaseAdmin();
   if (!supabase) {
@@ -203,7 +262,7 @@ router.delete('/:photoId', requireGuestSession(), async (req, res, next) => {
     const bucket = getStorageBucketName();
     const { data: photo, error: lookupError } = await supabase
       .from('photos')
-      .select('id, storage_path')
+      .select('id, storage_path, print_storage_path')
       .eq('id', req.params.photoId)
       .eq('guest_id', req.guest.id)
       .maybeSingle();
@@ -211,7 +270,8 @@ router.delete('/:photoId', requireGuestSession(), async (req, res, next) => {
     if (lookupError) throw lookupError;
     if (!photo) return res.status(404).json({ error: 'Foto não encontrada nesta galeria.' });
 
-    const { error: removeError } = await supabase.storage.from(bucket).remove([photo.storage_path]);
+    const pathsToRemove = [photo.storage_path, photo.print_storage_path].filter(Boolean);
+    const { error: removeError } = await supabase.storage.from(bucket).remove(pathsToRemove);
     if (removeError) throw removeError;
 
     const { error: deleteError } = await supabase.from('photos').delete().eq('id', photo.id).eq('guest_id', req.guest.id);
