@@ -24,6 +24,7 @@ import AdminPage from './pages/AdminPage.jsx';
 import SlideshowPage from './pages/SlideshowPage.jsx';
 import QrPage from './pages/QrPage.jsx';
 import { useEventSettings } from './lib/useEventSettings.js';
+import { fetchWithRetry } from './lib/fetchWithRetry.js';
 
 const FILTERS = [
   { key: 'natural', label: 'Original', css: 'none', canvas: 'none' },
@@ -33,6 +34,12 @@ const FILTERS = [
   { key: 'soft', label: 'Suave', css: 'brightness(1.06) contrast(.93) saturate(.86)', canvas: 'brightness(1.06) contrast(0.93) saturate(0.86)' },
 ];
 const EMOJIS = ['❤️', '🥂', '💍', '✨', '🎉', '🥰', '🤍', '💐'];
+
+function normalizePhoneInput(value) {
+  let digits = String(value ?? '').replace(/\D/g, '');
+  if ((digits.length === 12 || digits.length === 13) && digits.startsWith('55')) digits = digits.slice(2);
+  return digits;
+}
 
 async function readApiResponse(response) {
   const payload = await response.json().catch(() => ({}));
@@ -190,7 +197,11 @@ function GuestApp() {
   const [activeTab, setActiveTab] = useState(() => window.location.pathname.replace(/\/+$/, '') === '/story' ? 'story' : 'participar');
   const [name, setName] = useState('');
   const [whatsapp, setWhatsapp] = useState('');
+  const [recoveryMode, setRecoveryMode] = useState(false);
+  const [recoveryPhone, setRecoveryPhone] = useState('');
+  const [recovering, setRecovering] = useState(false);
   const [nameStatus, setNameStatus] = useState('idle');
+  const [phoneStatus, setPhoneStatus] = useState('idle');
   const [registering, setRegistering] = useState(false);
   const [message, setMessage] = useState(null);
   const [myPhotos, setMyPhotos] = useState([]);
@@ -205,7 +216,7 @@ function GuestApp() {
 
   const loadHealth = useCallback(async () => {
     try {
-      const data = await readApiResponse(await fetch('/api/health', { headers: { Accept: 'application/json' } }));
+      const data = await readApiResponse(await fetchWithRetry('/api/health', { headers: { Accept: 'application/json', 'Cache-Control': 'no-store' }, cache: 'no-store' }));
       setHealth({ state: 'online', supabaseConfigured: Boolean(data.supabaseConfigured) });
     } catch {
       setHealth({ state: 'offline', supabaseConfigured: false });
@@ -214,7 +225,7 @@ function GuestApp() {
 
   const loadMyPhotos = useCallback(async () => {
     try {
-      const data = await readApiResponse(await fetch('/api/guests/me/photos', { credentials: 'same-origin' }));
+      const data = await readApiResponse(await fetchWithRetry('/api/guests/me/photos', { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } }));
       setMyPhotos(data.photos || []);
     } catch (error) {
       if (error.status === 401) setMyPhotos([]);
@@ -225,11 +236,12 @@ function GuestApp() {
   const loadStories = useCallback(async () => {
     setStoriesError('');
     try {
-      const data = await readApiResponse(await fetch('/api/photos/stories'));
-      setStories(data.photos || []);
+      const data = await readApiResponse(await fetchWithRetry('/api/photos/stories', { cache: 'no-store', headers: { Accept: 'application/json' } }));
+      const uniquePhotos = [...new Map((data.photos || []).map((photo) => [photo.id, photo])).values()];
+      setStories(uniquePhotos);
     } catch (error) {
-      setStoriesError(error.message);
-      setStories([]);
+      // Mantém a última lista válida para que uma falha temporária não apague a galeria visível.
+      setStoriesError(`${error.message} Estamos mantendo as fotos já carregadas e tentaremos novamente.`);
     }
   }, []);
 
@@ -275,7 +287,7 @@ function GuestApp() {
     setNameStatus('checking');
     const timer = window.setTimeout(async () => {
       try {
-        const response = await fetch(`/api/guests/check-name?name=${encodeURIComponent(trimmed)}`);
+        const response = await fetchWithRetry(`/api/guests/check-name?name=${encodeURIComponent(trimmed)}`, { cache: 'no-store' });
         const data = await readApiResponse(response);
         if (!ignore) setNameStatus(data.available ? 'available' : 'unavailable');
       } catch (error) {
@@ -288,6 +300,37 @@ function GuestApp() {
       window.clearTimeout(timer);
     };
   }, [name]);
+
+  useEffect(() => {
+    const raw = whatsapp.trim();
+    if (!raw) {
+      setPhoneStatus('idle');
+      return undefined;
+    }
+
+    const digits = normalizePhoneInput(raw);
+    if (![10, 11].includes(digits.length)) {
+      setPhoneStatus('invalid');
+      return undefined;
+    }
+
+    let ignore = false;
+    setPhoneStatus('checking');
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetchWithRetry(`/api/guests/check-phone?whatsapp=${encodeURIComponent(digits)}`, { cache: 'no-store' });
+        const data = await readApiResponse(response);
+        if (!ignore) setPhoneStatus(data.available ? 'available' : 'unavailable');
+      } catch {
+        if (!ignore) setPhoneStatus('error');
+      }
+    }, 450);
+
+    return () => {
+      ignore = true;
+      window.clearTimeout(timer);
+    };
+  }, [whatsapp]);
 
   const handleRegister = async (event) => {
     event.preventDefault();
@@ -302,13 +345,23 @@ function GuestApp() {
       return;
     }
 
+    const normalizedPhone = normalizePhoneInput(whatsapp);
+    if (![10, 11].includes(normalizedPhone.length)) {
+      setMessage({ type: 'error', text: 'Informe um WhatsApp com DDD e número válido para poder recuperar seu acesso depois.' });
+      return;
+    }
+    if (phoneStatus === 'unavailable') {
+      setMessage({ type: 'error', text: 'Este WhatsApp já está cadastrado. Use “Acessar minhas fotos” para recuperar seu acesso.' });
+      return;
+    }
+
     setRegistering(true);
     try {
       const data = await readApiResponse(await fetch('/api/guests', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ name: normalizedName, whatsapp: whatsapp.trim() || null }),
+        body: JSON.stringify({ name: normalizedName, whatsapp: normalizedPhone }),
       }));
       setGuest(data.guest);
       setActiveTab('participar');
@@ -317,10 +370,58 @@ function GuestApp() {
       setWhatsapp('');
       await loadMyPhotos();
     } catch (error) {
-      if (error.status === 409) setNameStatus('unavailable');
+      if (error.status === 409 && error.field === 'name') setNameStatus('unavailable');
+      if (error.status === 409 && error.field === 'whatsapp') setPhoneStatus('unavailable');
       setMessage({ type: 'error', text: error.message });
     } finally {
       setRegistering(false);
+    }
+  };
+
+  const handleRecoverSession = async (event) => {
+    event.preventDefault();
+    setMessage(null);
+    const digits = recoveryPhone.replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '');
+    if (![10, 11].includes(digits.length)) {
+      setMessage({ type: 'error', text: 'Informe DDD e número de telefone com 10 ou 11 dígitos.' });
+      return;
+    }
+
+    setRecovering(true);
+    try {
+      const recoveryResult = await readApiResponse(await fetchWithRetry('/api/guests/recover-session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ whatsapp: digits }),
+      }, { retries: 1, baseDelayMs: 600, maxDelayMs: 1800 }));
+
+      const sessionResponse = await fetchWithRetry('/api/guests/me', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      }, { retries: 1, baseDelayMs: 400, maxDelayMs: 1200 });
+
+      if (sessionResponse.ok) {
+        const sessionData = await readApiResponse(sessionResponse);
+        setGuest(sessionData.guest);
+        setRecoveryMode(false);
+        setRecoveryPhone('');
+        setActiveTab('galeria');
+        setMessage({ type: 'success', text: `Acesso recuperado. Aqui estão suas fotos, ${sessionData.guest.name}.` });
+        await loadMyPhotos();
+      } else {
+        // A API mantém resposta genérica para não revelar se há cadastro para o telefone.
+        // Não mostre sucesso quando GET /me não confirma uma sessão válida.
+        setMessage({
+          type: 'error',
+          text: 'Não conseguimos abrir sua sessão neste navegador. Confira se informou o mesmo DDD e número usado no cadastro. Se continuar sem acesso, peça ajuda à organização do casamento.',
+        });
+      }
+    } catch (error) {
+      setMessage({ type: 'error', text: error.message || 'Não foi possível recuperar o acesso agora. Verifique a conexão e tente novamente.' });
+    } finally {
+      setRecovering(false);
     }
   };
 
@@ -363,7 +464,13 @@ function GuestApp() {
             <UserRound size={16} /><span>{guest.name}</span><LogOut size={14} />
           </button>
         ) : (
-          <span className="topbar-link"><ShieldCheck size={15} /> Acesso dos convidados</span>
+          <button
+            className="topbar-link topbar-recovery-button"
+            type="button"
+            onClick={() => { setActiveTab('participar'); setRecoveryMode(true); setMessage(null); }}
+          >
+            <ShieldCheck size={15} /> Já tem cadastro? Acessar minhas fotos
+          </button>
         )}
       </header>
 
@@ -410,14 +517,26 @@ function GuestApp() {
               <div className="stage-section-copy">
                 <span className="section-kicker">SEU LUGAR NESSA HISTÓRIA</span>
                 <h2>Vamos começar<br />pelo seu nome.</h2>
-                <p>O cadastro é rapidinho. Seu nome identifica as fotos que você compartilhar; o WhatsApp é opcional e nunca será exibido publicamente.</p>
+                <p>O cadastro é rapidinho. Seu nome identifica as fotos que você compartilhar; o WhatsApp é obrigatório para permitir a recuperação do acesso e nunca será exibido publicamente.</p>
                 <div className="stage-reassurance"><ShieldCheck size={17} /><span>Suas informações de contato ficam privadas.</span></div>
               </div>
+              {!recoveryMode ? (
               <form className="stage-form-card" onSubmit={handleRegister}>
                 <div className="stage-form-heading">
                   <span className="stage-form-icon"><Heart size={20} /></span>
                   <div><h3>Participar do casamento</h3><p>Preencha os campos abaixo para liberar a câmera.</p></div>
                 </div>
+                <button
+                  className="guest-recovery-entry"
+                  type="button"
+                  onClick={() => { setRecoveryMode(true); setMessage(null); }}
+                >
+                  <span className="guest-recovery-entry-icon"><UserRound size={18} /></span>
+                  <span className="guest-recovery-entry-copy">
+                    <strong>Já tem cadastro? Acesse suas fotos</strong>
+                    <small>Recupere seu acesso com DDD e número de telefone.</small>
+                  </span>
+                </button>
                 <label className="stage-field-label" htmlFor="guest-name">Nome completo <span>*</span></label>
                 <input
                   id="guest-name"
@@ -438,10 +557,10 @@ function GuestApp() {
                   {nameStatus === 'error' && 'Não foi possível verificar agora; o servidor validará no envio.'}
                   {nameStatus === 'idle' && 'O nome precisa ser único neste casamento.'}
                 </div>
-                <label className="stage-field-label" htmlFor="guest-whatsapp">WhatsApp <span className="optional">(opcional)</span></label>
+                <label className="stage-field-label" htmlFor="guest-whatsapp">WhatsApp <span>*</span></label>
                 <input
                   id="guest-whatsapp"
-                  className="stage-input"
+                  className={`stage-input ${phoneStatus === 'unavailable' || phoneStatus === 'invalid' ? 'input-error' : ''}`}
                   name="whatsapp"
                   autoComplete="tel"
                   inputMode="tel"
@@ -449,8 +568,18 @@ function GuestApp() {
                   value={whatsapp}
                   onChange={(event) => setWhatsapp(event.target.value)}
                   placeholder="(71) 99999-9999"
+                  required
+                  aria-describedby="phone-feedback"
                 />
-                <button className="button button-primary stage-submit-button" type="submit" disabled={registering || nameStatus === 'unavailable' || nameStatus === 'checking' || name.trim().length < 2 || health.state === 'offline'}>
+                <div id="phone-feedback" className={`stage-field-feedback ${phoneStatus === 'unavailable' || phoneStatus === 'invalid' ? 'feedback-error' : phoneStatus === 'available' ? 'feedback-success' : ''}`} aria-live="polite">
+                  {phoneStatus === 'checking' && <><LoaderCircle size={13} className="spin" /> Conferindo disponibilidade do telefone...</>}
+                  {phoneStatus === 'available' && <><CheckCircle2 size={13} /> Telefone disponível para este cadastro</>}
+                  {phoneStatus === 'unavailable' && <><AlertCircle size={13} /> Este telefone já está cadastrado. Recupere o acesso em vez de criar outra conta.</>}
+                  {phoneStatus === 'invalid' && <><AlertCircle size={13} /> Informe DDD e número com 10 ou 11 dígitos.</>}
+                  {phoneStatus === 'error' && 'Não foi possível conferir agora; o servidor validará o número ao cadastrar.'}
+                  {phoneStatus === 'idle' && 'Obrigatório: este número permitirá recuperar suas fotos neste navegador se perder a sessão.'}
+                </div>
+                <button className="button button-primary stage-submit-button" type="submit" disabled={registering || nameStatus === 'unavailable' || nameStatus === 'checking' || phoneStatus === 'unavailable' || phoneStatus === 'checking' || phoneStatus === 'invalid' || name.trim().length < 2 || !whatsapp.trim() || health.state === 'offline'}>
                   {registering ? <><LoaderCircle size={17} className="spin" /> Cadastrando...</> : <>Continuar para a câmera <Camera size={17} /></>}
                 </button>
                 {!health.supabaseConfigured && health.state === 'online' && (
@@ -458,6 +587,32 @@ function GuestApp() {
                 )}
                 <p className="stage-privacy-note">Ao continuar, você concorda que as fotos que publicar poderão aparecer na galeria compartilhada e no telão do casamento.</p>
               </form>
+              ) : (
+              <form className="stage-form-card" onSubmit={handleRecoverSession}>
+                <div className="stage-form-heading">
+                  <span className="stage-form-icon"><ShieldCheck size={20} /></span>
+                  <div><h3>Recuperar meu acesso</h3><p>Informe o DDD e o número usado no cadastro.</p></div>
+                </div>
+                <label className="stage-field-label" htmlFor="recovery-phone">Telefone usado no cadastro (DDD + número) <span>*</span></label>
+                <input
+                  id="recovery-phone"
+                  className="stage-input"
+                  name="recovery-phone"
+                  autoComplete="tel"
+                  inputMode="tel"
+                  maxLength={24}
+                  value={recoveryPhone}
+                  onChange={(event) => setRecoveryPhone(event.target.value)}
+                  placeholder="(71) 99999-9999"
+                  required
+                />
+                <p className="stage-privacy-note">Não é enviado código por WhatsApp. Por isso, qualquer pessoa que conheça esse número pode tentar recuperar a sessão correspondente. A resposta não confirma se o número está cadastrado.</p>
+                <button className="button button-primary stage-submit-button" type="submit" disabled={recovering || ![10, 11].includes(recoveryPhone.replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '').length)}>
+                  {recovering ? <><LoaderCircle size={17} className="spin" /> Conferindo acesso...</> : <>Recuperar acesso <UserRound size={17} /></>}
+                </button>
+                <button className="stage-link-button recovery-switch-button" type="button" onClick={() => { setRecoveryMode(false); setRecoveryPhone(''); setMessage(null); }}>Voltar ao cadastro</button>
+              </form>
+              )}
             </div>
           )}
 
@@ -499,9 +654,8 @@ function GuestApp() {
                   <button className="stage-secondary-button" type="button" onClick={loadStories}><RefreshCw size={15} /> Atualizar</button>
                 </div>
               </div>
-              {storiesError ? <div className="stage-inline-error"><AlertCircle size={18} /><span>{storiesError}</span></div> : (
-                <PhotoGrid photos={stories} emptyTitle="Ainda não há fotos publicadas" emptyDescription="Assim que os convidados compartilharem as primeiras lembranças, elas aparecerão aqui." layout={eventSettings.gallery_layout} onOpen={(photo) => { setViewerSource('story'); setViewerPhotoId(photo.id); }} />
-              )}
+              {storiesError && <div className="stage-inline-warning" role="status"><AlertCircle size={18} /><span>{storiesError}</span><button type="button" className="stage-link-button" onClick={loadStories}>Tentar novamente</button></div>}
+              <PhotoGrid photos={stories} emptyTitle="Ainda não há fotos publicadas" emptyDescription="Assim que os convidados compartilharem as primeiras lembranças, elas aparecerão aqui." layout={eventSettings.gallery_layout} onOpen={(photo) => { setViewerSource('story'); setViewerPhotoId(photo.id); }} />
             </div>
           )}
         </section>
@@ -513,7 +667,7 @@ function GuestApp() {
         <div className="section-wrap footer-inner">
           <a className="brand footer-brand" href="#inicio" onClick={() => setActiveTab('participar')}><span className="brand-mark"><Heart size={16} /></span><span className="brand-name">nosso<span>story</span></span></a>
           <span>Uma foto, uma lembrança, uma história inteira.</span>
-          <span className="footer-version">VERSÃO 0.3 · STORY, TELÃO E PAINEL MASTER</span>
+          <span className="footer-version">VERSÃO 0.4 · SESSÕES, UPLOAD RESILIENTE E SINCRONIZAÇÃO</span>
         </div>
       </footer>
     </div>
@@ -532,6 +686,8 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
   const [caption, setCaption] = useState('');
   const [emoji, setEmoji] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [uploadFailed, setUploadFailed] = useState(false);
+  const uploadIdRef = useRef(null);
   const [facingMode, setFacingMode] = useState('user');
 
   const stopCamera = useCallback(() => {
@@ -599,6 +755,8 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
     }
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     setCapturedImage(canvas.toDataURL('image/jpeg', 0.9));
+    uploadIdRef.current = null;
+    setUploadFailed(false);
     setCameraError('');
     stopCamera();
   };
@@ -606,8 +764,8 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
   const handleChooseFile = (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      setCameraError('Selecione um arquivo de imagem.');
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setCameraError('Selecione uma imagem JPEG, PNG ou WebP.');
       event.target.value = '';
       return;
     }
@@ -619,6 +777,8 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
     const reader = new FileReader();
     reader.onload = () => {
       setCapturedImage(String(reader.result));
+      uploadIdRef.current = null;
+      setUploadFailed(false);
       setCameraError('');
       stopCamera();
     };
@@ -628,26 +788,42 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
   };
 
   const handlePublish = async () => {
-    if (!capturedImage) return;
+    if (!capturedImage || uploading) return;
     setUploading(true);
+    setUploadFailed(false);
     setCameraError('');
     try {
       const blob = await createEditedJpeg(capturedImage, filterKey, caption, emoji);
       const params = new URLSearchParams({ filter: filterKey, caption: caption.slice(0, 100), emoji: emoji.slice(0, 16) });
-      const uploadResult = await readApiResponse(await fetch(`/api/photos?${params.toString()}`, {
+      if (!uploadIdRef.current) {
+        uploadIdRef.current = typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+            const random = Math.floor(Math.random() * 16);
+            return (char === 'x' ? random : (random & 0x3) | 0x8).toString(16);
+          });
+      }
+      const uploadResult = await readApiResponse(await fetchWithRetry(`/api/photos?${params.toString()}`, {
         method: 'POST',
         credentials: 'same-origin',
-        headers: { 'Content-Type': 'image/jpeg', Accept: 'application/json' },
+        headers: {
+          'Content-Type': 'image/jpeg',
+          Accept: 'application/json',
+          'Idempotency-Key': uploadIdRef.current,
+        },
         body: blob,
-      }));
+      }, { retries: 2, baseDelayMs: 650, maxDelayMs: 3000 }));
       setCapturedImage('');
       setCaption('');
       setEmoji('');
       setFilterKey('natural');
+      setUploadFailed(false);
+      uploadIdRef.current = null;
       await onUploaded(uploadResult.photo);
     } catch (error) {
-      setCameraError(error.message);
-      if (error.status === 401) setGlobalMessage({ type: 'error', text: 'Sua sessão expirou. Faça o cadastro novamente neste navegador.' });
+      setUploadFailed(true);
+      setCameraError(error.message || 'Não foi possível enviar a foto. Ela continua nesta tela; tente novamente.');
+      if (error.status === 401) setGlobalMessage({ type: 'error', text: 'Sua sessão expirou. Recupere o acesso pelo telefone usado no cadastro.' });
     } finally {
       setUploading(false);
     }
@@ -695,29 +871,29 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
           </>
         ) : (
           <>
-            <div className="stage-preview-header"><div><span className="section-kicker">PRÉ-VISUALIZAÇÃO</span><h3>Gostou do resultado?</h3></div><button className="stage-icon-button" type="button" onClick={() => setCapturedImage('')} aria-label="Cancelar edição"><X size={17} /></button></div>
+            <div className="stage-preview-header"><div><span className="section-kicker">PRÉ-VISUALIZAÇÃO</span><h3>Gostou do resultado?</h3></div><button className="stage-icon-button" type="button" onClick={() => { setCapturedImage(''); uploadIdRef.current = null; setUploadFailed(false); setCameraError(''); }} aria-label="Cancelar edição" disabled={uploading}><X size={17} /></button></div>
             <div className="stage-photo-preview">
               <img src={capturedImage} alt="Prévia da fotografia" style={{ filter: (FILTERS.find((item) => item.key === filterKey) || FILTERS[0]).css }} />
               {(caption.trim() || emoji) && <div className="stage-preview-overlay"><span>{emoji}</span>{caption.trim() && <p>{caption.trim()}</p>}</div>}
             </div>
             <div className="stage-filter-row" aria-label="Filtros da fotografia">
               {FILTERS.map((filter) => (
-                <button key={filter.key} type="button" className={`stage-filter-chip ${filterKey === filter.key ? 'selected' : ''}`} onClick={() => setFilterKey(filter.key)}>
+                <button key={filter.key} type="button" className={`stage-filter-chip ${filterKey === filter.key ? 'selected' : ''}`} disabled={uploading} onClick={() => { if (uploadFailed && filterKey !== filter.key) uploadIdRef.current = null; setFilterKey(filter.key); setUploadFailed(false); }}>
                   <span className="stage-filter-swatch" style={{ filter: filter.css }}><img src={capturedImage} alt="" /></span>{filter.label}
                 </button>
               ))}
             </div>
             <label className="stage-field-label" htmlFor="photo-caption">Mensagem na foto <span className="optional">(opcional)</span></label>
-            <textarea id="photo-caption" className="stage-input stage-caption-input" maxLength={100} rows={2} value={caption} onChange={(event) => setCaption(event.target.value)} placeholder="Uma lembrança para guardar..." />
+            <textarea id="photo-caption" className="stage-input stage-caption-input" maxLength={100} rows={2} value={caption} disabled={uploading} onChange={(event) => { if (uploadFailed) uploadIdRef.current = null; setCaption(event.target.value); setUploadFailed(false); }} placeholder="Uma lembrança para guardar..." />
             <div className="stage-emoji-label">Escolha um emoji</div>
             <div className="stage-emoji-row">
-              {EMOJIS.map((item) => <button key={item} type="button" className={`stage-emoji-button ${emoji === item ? 'selected' : ''}`} onClick={() => setEmoji(emoji === item ? '' : item)} aria-label={`Adicionar emoji ${item}`}>{item}</button>)}
+              {EMOJIS.map((item) => <button key={item} type="button" className={`stage-emoji-button ${emoji === item ? 'selected' : ''}`} disabled={uploading} onClick={() => { if (uploadFailed) uploadIdRef.current = null; setEmoji(emoji === item ? '' : item); setUploadFailed(false); }} aria-label={`Adicionar emoji ${item}`}>{item}</button>)}
             </div>
             {cameraError && <div className="stage-inline-error"><AlertCircle size={16} /><span>{cameraError}</span></div>}
             <div className="stage-preview-actions">
-              <button className="stage-secondary-button" type="button" onClick={() => { setCapturedImage(''); setCaption(''); setEmoji(''); setCameraError(''); }} disabled={uploading}><X size={15} /> Cancelar</button>
+              <button className="stage-secondary-button" type="button" onClick={() => { setCapturedImage(''); setCaption(''); setEmoji(''); setCameraError(''); setUploadFailed(false); uploadIdRef.current = null; }} disabled={uploading}><X size={15} /> Cancelar</button>
               <button className="button button-primary stage-publish-button" type="button" onClick={handlePublish} disabled={uploading}>
-                {uploading ? <><LoaderCircle size={17} className="spin" /> Enviando...</> : <><Send size={16} /> Publicar foto</>}
+                {uploading ? <><LoaderCircle size={17} className="spin" /> Enviando...</> : uploadFailed ? <><RefreshCw size={16} /> Tentar novamente</> : <><Send size={16} /> Publicar foto</>}
               </button>
             </div>
             <p className="stage-privacy-note">A foto editada será salva na sua galeria e exibida no story compartilhado.</p>

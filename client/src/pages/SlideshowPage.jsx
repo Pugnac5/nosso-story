@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Expand, Heart, LoaderCircle, Pause, Play, RefreshCw, QrCode } from 'lucide-react';
 import { useEventSettings } from '../lib/useEventSettings.js';
+import { fetchWithRetry } from '../lib/fetchWithRetry.js';
 
 async function fetchStories() {
-  const response = await fetch('/api/photos/stories', { headers: { Accept: 'application/json' } });
+  const response = await fetchWithRetry('/api/photos/stories', { cache: 'no-store', headers: { Accept: 'application/json', 'Cache-Control': 'no-store' } });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || 'Não foi possível carregar as fotos.');
   return payload.photos || [];
@@ -16,14 +17,32 @@ export default function SlideshowPage() {
   const [playing, setPlaying] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [imageFailedId, setImageFailedId] = useState(null);
+  const requestInFlightRef = useRef(false);
   const activePhotoIdRef = useRef(null);
   const currentPhoto = photos[index] || null;
 
   useEffect(() => { activePhotoIdRef.current = currentPhoto?.id || null; }, [currentPhoto]);
 
+  useEffect(() => {
+    setImageFailedId(null);
+  }, [currentPhoto?.id, currentPhoto?.url]);
+
+  useEffect(() => {
+    if (!imageFailedId || photos.length < 2) return undefined;
+    const timer = window.setTimeout(() => {
+      setIndex((current) => photos.length ? (current + 1) % photos.length : 0);
+      setImageFailedId(null);
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [imageFailedId, photos.length]);
+
   const loadStories = useCallback(async () => {
+    if (requestInFlightRef.current) return;
+    requestInFlightRef.current = true;
     try {
-      const nextPhotos = await fetchStories();
+      const responsePhotos = await fetchStories();
+      const nextPhotos = [...new Map(responsePhotos.map((photo) => [photo.id, photo])).values()];
       setPhotos(nextPhotos);
       setIndex((previousIndex) => {
         if (!nextPhotos.length) return 0;
@@ -33,8 +52,10 @@ export default function SlideshowPage() {
       });
       setError('');
     } catch (fetchError) {
-      setError(fetchError.message);
+      // Mantém o último conjunto conhecido durante uma falha transitória da API/rede.
+      setError(fetchError.message || 'Conexão temporariamente indisponível. Tentaremos novamente.');
     } finally {
+      requestInFlightRef.current = false;
       setLoading(false);
     }
   }, []);
@@ -89,6 +110,7 @@ export default function SlideshowPage() {
       </div>
 
       <section className="slideshow-stage" aria-live="polite">
+        {error && photos.length > 0 && <div className="slideshow-status-warning" role="status">Conexão instável. Mantendo a apresentação e tentando atualizar as fotos.</div>}
         {loading ? (
           <div className="slideshow-empty"><LoaderCircle size={30} className="spin" /><p>Carregando lembranças...</p></div>
         ) : error && !photos.length ? (
@@ -97,7 +119,9 @@ export default function SlideshowPage() {
           <div className="slideshow-empty"><span className="slideshow-empty-icon"><Heart size={32} /></span><h1>As lembranças estão chegando</h1><p>Quando os convidados publicarem fotos, elas aparecerão aqui automaticamente.</p><button type="button" onClick={loadStories}><RefreshCw size={16} /> Verificar novamente</button></div>
         ) : (
           <article className={`slideshow-photo slideshow-photo-${settings.slideshow_transition || 'fade'}`} key={currentPhoto.id}>
-            {currentPhoto.url ? <img src={currentPhoto.url} alt={currentPhoto.caption || 'Foto do casamento'} /> : <div className="slideshow-empty">Foto temporariamente indisponível</div>}
+            {currentPhoto.url && imageFailedId !== currentPhoto.id
+              ? <img src={currentPhoto.url} alt={currentPhoto.caption || 'Foto do casamento'} onError={() => setImageFailedId(currentPhoto.id)} />
+              : <div className="slideshow-image-fallback"><p>Esta foto está temporariamente indisponível.</p>{photos.length > 1 && <button type="button" onClick={() => go(1)}>Próxima foto</button>}</div>}
             <div className="slideshow-photo-caption">
               {currentPhoto.emoji && <span className="slideshow-emoji">{currentPhoto.emoji}</span>}
               {currentPhoto.caption && <p>{currentPhoto.caption}</p>}

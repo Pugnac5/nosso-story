@@ -18,11 +18,12 @@ function readCookie(req, cookieName) {
 }
 
 function cookieOptions(req, maxAge) {
-  const secure = req.secure || req.get('x-forwarded-proto') === 'https';
+  const forwardedProto = String(req.get('x-forwarded-proto') || '').split(',')[0].trim().toLowerCase();
+  const secure = process.env.NODE_ENV === 'production' || req.secure || forwardedProto === 'https';
   return {
     httpOnly: true,
     secure,
-    sameSite: 'strict',
+    sameSite: 'lax',
     path: '/',
     maxAge,
   };
@@ -60,7 +61,7 @@ export function createAdminSessionToken() {
   return `${payload}.${signPayload(payload, secret)}`;
 }
 
-export function isAdminRequest(req) {
+export function isAdminRequest(req, res = null) {
   const secret = sessionSecret();
   if (!secret) return false;
   const token = readCookie(req, ADMIN_COOKIE_NAME);
@@ -76,7 +77,12 @@ export function isAdminRequest(req) {
 
   try {
     const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    return Number.isFinite(decoded.exp) && decoded.exp > Date.now();
+    if (!Number.isFinite(decoded.exp) || decoded.exp <= Date.now()) return false;
+    // Renovação deslizante: prolonga a sessão se faltar menos de uma hora para expirar.
+    if (res && decoded.exp - Date.now() <= 60 * 60 * 1000) {
+      setAdminSessionCookie(res, req, createAdminSessionToken());
+    }
+    return true;
   } catch {
     return false;
   }
@@ -123,7 +129,7 @@ export function requireAdmin(req, res, next) {
   if (!isAdminAuthConfigured()) {
     return res.status(503).json({ error: 'A autenticação administrativa ainda não foi configurada no ambiente.', code: 'ADMIN_NOT_CONFIGURED' });
   }
-  if (!isAdminRequest(req)) {
+  if (!isAdminRequest(req, res)) {
     return res.status(401).json({ error: 'Faça login na área administrativa para continuar.', code: 'ADMIN_AUTH_REQUIRED' });
   }
   return next();

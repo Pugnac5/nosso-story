@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { fetchWithRetry } from './fetchWithRetry.js';
 
 export const DEFAULT_EVENT_SETTINGS = {
   couple_names: 'Nosso casamento',
@@ -47,7 +48,7 @@ export function useEventSettings() {
 
   const refreshSettings = useCallback(async () => {
     try {
-      const response = await fetch('/api/settings', { headers: { Accept: 'application/json' } });
+      const response = await fetchWithRetry('/api/settings', { cache: 'no-store', headers: { Accept: 'application/json' } });
       if (!response.ok) throw new Error('Não foi possível carregar as configurações do evento.');
       const payload = await response.json();
       setSettings({ ...DEFAULT_EVENT_SETTINGS, ...(payload.settings || {}) });

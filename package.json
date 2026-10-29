@@ -1,8 +1,8 @@
 {
   "name": "nosso-story",
-  "version": "0.1.0",
+  "version": "0.4.4",
   "private": true,
-  "description": "Aplicação de compartilhamento de fotos para casamento.",
+  "description": "Compartilhamento de fotos para casamento com recuperação de sessão, uploads idempotentes e sincronização resiliente.",
   "engines": {
     "node": ">=22.12.0 <25.0.0"
   },
@@ -14,7 +14,8 @@
     "dev": "concurrently -k -n API,WEB -c green,blue \"npm run dev --workspace server\" \"npm run dev --workspace client\"",
     "build": "npm run build --workspace client",
     "start": "node server/src/server.js",
-    "check": "npm run build && node --check server/src/app.js && node --check server/src/server.js && node --check server/src/lib/supabase.js && node --check server/src/lib/guest-session.js && node --check server/src/routes/guests.routes.js && node --check server/src/routes/photos.routes.js"
+    "check": "npm run build && node --check server/src/app.js && node --check server/src/server.js && node --check server/src/lib/supabase.js && node --check server/src/lib/guest-session.js && node --check server/src/lib/guest-recovery-limit.js && node --check server/src/lib/admin-session.js && node --check server/src/routes/guests.routes.js && node --check server/src/routes/photos.routes.js && node --check server/src/routes/admin.routes.js && node --check server/src/routes/settings.routes.js",
+    "test:phase1": "node --test server/test/*.test.js"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

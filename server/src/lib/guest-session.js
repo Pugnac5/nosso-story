@@ -4,6 +4,7 @@ import { getSupabaseAdmin } from './supabase.js';
 export const GUEST_COOKIE_NAME = 'nosso_story_guest';
 const SESSION_DAYS = Math.max(1, Math.min(90, Number(process.env.GUEST_SESSION_DAYS) || 30));
 const SESSION_MAX_AGE_MS = SESSION_DAYS * 24 * 60 * 60 * 1000;
+const SESSION_RENEW_THRESHOLD_MS = Math.min(7 * 24 * 60 * 60 * 1000, Math.floor(SESSION_MAX_AGE_MS / 3));
 
 export function normalizeGuestName(value) {
   return String(value ?? '')
@@ -13,9 +14,12 @@ export function normalizeGuestName(value) {
     .toLocaleLowerCase('pt-BR');
 }
 
+/** Normaliza para DDD+número (10 ou 11 dígitos), aceitando +55 opcional. */
 export function normalizeWhatsApp(value) {
   if (value == null || String(value).trim() === '') return null;
-  return String(value).replace(/\D/g, '');
+  let digits = String(value).replace(/\D/g, '');
+  if ((digits.length === 12 || digits.length === 13) && digits.startsWith('55')) digits = digits.slice(2);
+  return digits;
 }
 
 export function hashSessionToken(token) {
@@ -23,10 +27,11 @@ export function hashSessionToken(token) {
 }
 
 function cookieOptions(req, maxAge) {
-  const isHttps = req.get('x-forwarded-proto') === 'https' || req.secure;
+  const forwardedProto = String(req.get('x-forwarded-proto') || '').split(',')[0].trim().toLowerCase();
+  const secure = process.env.NODE_ENV === 'production' || req.secure || forwardedProto === 'https';
   return {
     httpOnly: true,
-    secure: isHttps,
+    secure,
     sameSite: 'lax',
     path: '/',
     maxAge,
@@ -57,29 +62,60 @@ function readCookie(req, cookieName) {
       return value;
     }
   }
-
   return null;
 }
 
-export async function getGuestFromRequest(req) {
+/**
+ * Confere o token e a expiração persistida no banco. Renova a sessão de forma deslizante
+ * quando está perto de expirar. Falha ao renovar não derruba uma sessão ainda válida.
+ */
+export async function getGuestFromRequest(req, res = null) {
   const token = readCookie(req, GUEST_COOKIE_NAME);
   if (!token || token.length < 40) return null;
 
   const supabase = getSupabaseAdmin();
   if (!supabase) return null;
 
+  const tokenHash = hashSessionToken(token);
   const { data, error } = await supabase
     .from('guests')
-    .select('id, name, created_at')
-    .eq('session_token_hash', hashSessionToken(token))
+    .select('id, name, created_at, session_expires_at')
+    .eq('session_token_hash', tokenHash)
     .maybeSingle();
 
   if (error) {
     console.error('Não foi possível validar a sessão do convidado:', error.message);
     throw new Error('Não foi possível validar a sessão do convidado.');
   }
+  if (!data) {
+    if (res) clearGuestSessionCookie(res, req);
+    return null;
+  }
 
-  return data;
+  const expiresAt = Date.parse(data.session_expires_at || '');
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    if (res) clearGuestSessionCookie(res, req);
+    return null;
+  }
+
+  if (res) {
+    if (expiresAt - Date.now() <= SESSION_RENEW_THRESHOLD_MS) {
+      const nextExpiry = new Date(Date.now() + SESSION_MAX_AGE_MS).toISOString();
+      const { error: renewError } = await supabase
+        .from('guests')
+        .update({ session_expires_at: nextExpiry })
+        .eq('id', data.id)
+        .eq('session_token_hash', tokenHash);
+
+      if (renewError) {
+        console.error('Não foi possível renovar a sessão do convidado:', renewError.message);
+      } else {
+        setGuestSessionCookie(res, req, token);
+      }
+    }
+  }
+
+  return { id: data.id, name: data.name, created_at: data.created_at };
 }
 
 export function requireGuestSession() {
@@ -92,9 +128,9 @@ export function requireGuestSession() {
         });
       }
 
-      const guest = await getGuestFromRequest(req);
+      const guest = await getGuestFromRequest(req, res);
       if (!guest) {
-        return res.status(401).json({ error: 'Cadastre-se para continuar.', code: 'GUEST_SESSION_REQUIRED' });
+        return res.status(401).json({ error: 'Sua sessão não está ativa. Entre ou recupere o acesso para continuar.', code: 'GUEST_SESSION_REQUIRED' });
       }
 
       req.guest = guest;
