@@ -20,11 +20,13 @@ import {
   X,
 } from 'lucide-react';
 import StoryViewer from './pages/StoryViewer.jsx';
+import ReactionBar from './components/ReactionBar.jsx';
 import AdminPage from './pages/AdminPage.jsx';
 import SlideshowPage from './pages/SlideshowPage.jsx';
 import QrPage from './pages/QrPage.jsx';
 import { useEventSettings } from './lib/useEventSettings.js';
 import { fetchWithRetry } from './lib/fetchWithRetry.js';
+import { deletePhotoDraft, readPhotoDraft, savePhotoDraft } from './lib/photoDraftStore.js';
 
 const FILTERS = [
   { key: 'natural', label: 'Original', css: 'none', canvas: 'none' },
@@ -33,7 +35,7 @@ const FILTERS = [
   { key: 'rose', label: 'Romântico', css: 'saturate(1.28) hue-rotate(-10deg)', canvas: 'saturate(1.28) hue-rotate(-10deg)' },
   { key: 'soft', label: 'Suave', css: 'brightness(1.06) contrast(.93) saturate(.86)', canvas: 'brightness(1.06) contrast(0.93) saturate(0.86)' },
 ];
-const EMOJIS = ['❤️', '🥂', '💍', '✨', '🎉', '🥰', '🤍', '💐'];
+const EMOJIS = ['❤️', '🩷', '💗', '💖', '💞', '💘', '🤍', '💜', '💍', '💐', '🌹', '🌷', '🌸', '🌻', '✨', '⭐', '🌟', '🥂', '🍾', '🎉', '🎊', '🎂', '🍰', '😍', '🥰', '😘', '🤗', '😊', '😂', '🥹', '😭', '🫶', '🙌', '👏', '🎶', '💃', '🕺', '🕊️', '🙏', '🔥', '🌈', '🎈', '💌', '💝'];
 
 function normalizePhoneInput(value) {
   let digits = String(value ?? '').replace(/\D/g, '');
@@ -62,25 +64,7 @@ function dataUrlToImage(dataUrl) {
   });
 }
 
-function wrapCanvasText(context, text, maxWidth) {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  const lines = [];
-  let line = '';
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (line && context.measureText(candidate).width > maxWidth) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = candidate;
-    }
-  }
-  if (line) lines.push(line);
-  if (lines.length <= 2) return lines;
-  return [`${lines[0]} ${lines[1]}`.slice(0, 66), `${lines.slice(2).join(' ').slice(0, 66)}`];
-}
-
-async function createEditedJpeg(dataUrl, filterKey, caption, emoji) {
+async function createEditedJpeg(dataUrl, filterKey) {
   const image = await dataUrlToImage(dataUrl);
   const maxDimension = 1600;
   const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
@@ -97,47 +81,8 @@ async function createEditedJpeg(dataUrl, filterKey, caption, emoji) {
   context.drawImage(image, 0, 0, width, height);
   context.filter = 'none';
 
-  const cleanCaption = String(caption || '').trim().slice(0, 100);
-  const cleanEmoji = String(emoji || '').trim().slice(0, 16);
-  if (cleanCaption || cleanEmoji) {
-    const overlayHeight = Math.round(height * 0.28);
-    const gradient = context.createLinearGradient(0, height - overlayHeight, 0, height);
-    gradient.addColorStop(0, 'rgba(20, 12, 16, 0)');
-    gradient.addColorStop(1, 'rgba(20, 12, 16, 0.70)');
-    context.fillStyle = gradient;
-    context.fillRect(0, height - overlayHeight, width, overlayHeight);
-
-    const margin = Math.round(width * 0.07);
-    const maxTextWidth = width - margin * 2;
-    const emojiSize = Math.max(24, Math.min(58, Math.round(width * 0.055)));
-    const fontSize = Math.max(20, Math.min(42, Math.round(width * 0.038)));
-    let baseline = height - Math.max(24, Math.round(height * 0.045));
-
-    context.textAlign = 'center';
-    context.textBaseline = 'alphabetic';
-    context.fillStyle = '#ffffff';
-    context.shadowColor = 'rgba(0, 0, 0, .35)';
-    context.shadowBlur = 7;
-    context.shadowOffsetY = 2;
-
-    const lines = [];
-    context.font = `600 ${fontSize}px system-ui, sans-serif`;
-    if (cleanCaption) lines.push(...wrapCanvasText(context, cleanCaption, maxTextWidth));
-    const lineHeight = Math.round(fontSize * 1.2);
-    if (cleanEmoji) {
-      context.font = `${emojiSize}px "Apple Color Emoji", "Segoe UI Emoji", sans-serif`;
-      const emojiBaseline = lines.length ? baseline - (lines.length * lineHeight) - 5 : baseline;
-      context.fillText(cleanEmoji, width / 2, emojiBaseline, maxTextWidth);
-    }
-    if (lines.length) {
-      context.font = `600 ${fontSize}px system-ui, sans-serif`;
-      lines.forEach((line, index) => context.fillText(line, width / 2, baseline - (lines.length - index - 1) * lineHeight, maxTextWidth));
-    }
-    context.shadowColor = 'transparent';
-    context.shadowBlur = 0;
-    context.shadowOffsetY = 0;
-  }
-
+  // v0.6: caption/emoji ficam como metadados e overlay HTML. A imagem publicada
+  // não recebe texto gravado nos pixels, para permitir editar estilo e preservar original.
   const blob = await new Promise((resolve, reject) => {
     canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('Não foi possível preparar o arquivo da foto.'))), 'image/jpeg', 0.86);
   });
@@ -175,7 +120,7 @@ async function createPrintJpeg(dataUrl, filterKey) {
   return blob;
 }
 
-function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete, onOpen, layout = 'grid' }) {
+function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete, onOpen, onReact, canReact = false, layout = 'grid' }) {
   if (!photos.length) {
     return (
       <div className="stage-empty">
@@ -188,39 +133,47 @@ function PhotoGrid({ photos, emptyTitle, emptyDescription, onDelete, onOpen, lay
 
   return (
     <div className={`stage-photo-grid ${layout === 'compact' ? 'stage-photo-grid-compact' : ''}`}>
-      {photos.map((photo) => (
-        <article className="stage-photo-card" key={photo.id}>
-          {photo.url ? (
-            <button className="stage-photo-open-button" type="button" onClick={() => onOpen?.(photo)} aria-label={`Abrir foto de ${photo.guest_name || 'convidado'}`}>
-              <img className="stage-photo-img" src={photo.url} alt={photo.caption || 'Foto do casamento'} loading="lazy" />
-            </button>
-          ) : (
-            <div className="stage-photo-unavailable"><ImageIcon size={24} /><span>Prévia indisponível</span></div>
-          )}
-          {(photo.emoji || photo.caption) && (
-            <div className="stage-photo-caption">
-              {photo.emoji && <span>{photo.emoji}</span>}
-              {photo.caption && <p>{photo.caption}</p>}
-            </div>
-          )}
-          {photo.status === 'pending' && <span className="stage-photo-pending-label">Aguardando aprovação</span>}
-          <div className="stage-photo-meta">
-            <span>{new Date(photo.created_at).toLocaleDateString('pt-BR')}</span>
-            {onDelete && (
-              <button className="stage-icon-button stage-delete-button" type="button" onClick={() => onDelete(photo)} aria-label="Excluir foto" title="Excluir foto">
-                <Trash2 size={15} />
+      {photos.map((photo) => {
+        const hasDomCaption = photo.caption_render_mode === 'dom' || !photo.caption_render_mode;
+        const captionStyle = {
+          color: photo.caption_color || '#FFFFFF',
+          '--caption-font-size': photo.caption_size === 'small' ? '9px' : photo.caption_size === 'large' ? '14px' : '11px',
+        };
+        return (
+          <article className="stage-photo-card" key={photo.id}>
+            {photo.url ? (
+              <button className="stage-photo-open-button" type="button" onClick={() => onOpen?.(photo)} aria-label={`Abrir foto de ${photo.guest_name || 'convidado'}`}>
+                <img className="stage-photo-img" src={photo.url} alt={photo.caption || 'Foto do casamento'} loading="lazy" />
               </button>
+            ) : (
+              <div className="stage-photo-unavailable"><ImageIcon size={24} /><span>Prévia indisponível</span></div>
             )}
-          </div>
-        </article>
-      ))}
+            {hasDomCaption && (photo.emoji || photo.caption) && (
+              <div className={`stage-photo-caption caption-position-${photo.caption_position || 'bottom'} caption-size-${photo.caption_size || 'medium'}`} style={captionStyle}>
+                {photo.emoji && <span>{photo.emoji}</span>}
+                {photo.caption && <p>{photo.caption}</p>}
+              </div>
+            )}
+            {photo.status === 'pending' && <span className="stage-photo-pending-label">Aguardando aprovação</span>}
+            <div className="stage-photo-meta">
+              <span>{new Date(photo.created_at).toLocaleDateString('pt-BR')}</span>
+              <span className={`stage-photo-status ${photo.status === 'pending' ? 'pending' : ''}`}>{photo.status === 'pending' ? 'Pendente' : 'Publicada'}</span>
+              {onDelete && (
+                <button className="stage-icon-button stage-delete-button" type="button" onClick={() => onDelete(photo)} aria-label="Excluir foto" title="Excluir foto">
+                  <Trash2 size={15} />
+                </button>
+              )}
+            </div>
+            <ReactionBar photo={photo} canReact={canReact && photo.status !== 'pending'} onReact={onReact} compact />
+          </article>
+        );
+      })}
     </div>
   );
 }
 
 function GuestApp() {
   const { settings: eventSettings, refreshSettings } = useEventSettings();
-  const [health, setHealth] = useState({ state: 'checking', supabaseConfigured: false });
   const [guest, setGuest] = useState(null);
   const [activeTab, setActiveTab] = useState(() => window.location.pathname.replace(/\/+$/, '') === '/story' ? 'story' : 'participar');
   const [name, setName] = useState('');
@@ -241,15 +194,6 @@ function GuestApp() {
   const viewerPhotos = viewerSource === 'story' ? stories : myPhotos;
   const closePhotoViewer = useCallback(() => setViewerPhotoId(null), []);
   const movePhotoViewer = useCallback((photo) => setViewerPhotoId(photo.id), []);
-
-  const loadHealth = useCallback(async () => {
-    try {
-      const data = await readApiResponse(await fetchWithRetry('/api/health', { headers: { Accept: 'application/json', 'Cache-Control': 'no-store' }, cache: 'no-store' }));
-      setHealth({ state: 'online', supabaseConfigured: Boolean(data.supabaseConfigured) });
-    } catch {
-      setHealth({ state: 'offline', supabaseConfigured: false });
-    }
-  }, []);
 
   const loadMyPhotos = useCallback(async () => {
     try {
@@ -275,7 +219,6 @@ function GuestApp() {
 
   useEffect(() => {
     let ignore = false;
-    loadHealth();
     fetch('/api/guests/me', { credentials: 'same-origin' })
       .then(async (response) => {
         if (response.status === 401) return null;
@@ -291,7 +234,7 @@ function GuestApp() {
         if (!ignore) loadStories();
       });
     return () => { ignore = true; };
-  }, [loadHealth, loadStories]);
+  }, [loadStories]);
 
   useEffect(() => {
     if (guest) loadMyPhotos();
@@ -464,6 +407,28 @@ function GuestApp() {
     }
   };
 
+  const handlePhotoReaction = useCallback(async (photo, emoji) => {
+    if (!guest) {
+      setMessage({ type: 'error', text: 'Entre no casamento para reagir às fotos.' });
+      return;
+    }
+    try {
+      const result = await readApiResponse(await fetchWithRetry(`/api/photos/${encodeURIComponent(photo.id)}/reactions`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ emoji, active: photo?.my_reaction !== emoji }),
+      }, { retries: 1, baseDelayMs: 400, maxDelayMs: 1200 }));
+      const updatePhoto = (items) => items.map((item) => item.id === photo.id
+        ? { ...item, reactions: result.reactions || {}, my_reaction: result.my_reaction || null }
+        : item);
+      setStories(updatePhoto);
+      setMyPhotos(updatePhoto);
+    } catch (error) {
+      setMessage({ type: 'error', text: error.message || 'Não foi possível salvar sua reação. Tente novamente.' });
+    }
+  }, [guest]);
+
   const handleDeletePhoto = async (photo) => {
     if (!window.confirm('Deseja excluir esta foto da sua galeria e do story compartilhado?')) return;
     try {
@@ -504,18 +469,10 @@ function GuestApp() {
 
       <main className="stage-main" id="inicio">
         <section className="stage-welcome">
-          <div>
+          <div className="stage-welcome-copy">
             <span className="eyebrow"><Sparkles size={14} /> {eventSettings.event_tagline || 'CADA OLHAR CONTA UMA HISTÓRIA'}</span>
             <h1>{eventSettings.hero_title || 'O grande dia,'}<br /><span>{eventSettings.hero_highlight || 'do jeito que vocês viveram.'}</span></h1>
             <p>{eventSettings.hero_description || 'Registre os momentos espontâneos, escreva uma mensagem e compartilhe a lembrança com todos os convidados.'}</p>
-          </div>
-          <div className="stage-health-card">
-            <div className="stage-health-heading">
-              {health.state === 'online' ? <CheckCircle2 size={19} /> : health.state === 'offline' ? <AlertCircle size={19} /> : <LoaderCircle className="spin" size={19} />}
-              <strong>{health.state === 'online' ? 'Aplicação conectada' : health.state === 'offline' ? 'API indisponível' : 'Conferindo conexão'}</strong>
-            </div>
-            <p>{health.supabaseConfigured ? 'A configuração do Supabase foi detectada pelo backend.' : 'O cadastro será habilitado depois de configurar as credenciais do Supabase.'}</p>
-            <button className="stage-link-button" type="button" onClick={loadHealth}><RefreshCw size={13} /> Verificar novamente</button>
           </div>
         </section>
 
@@ -607,12 +564,9 @@ function GuestApp() {
                   {phoneStatus === 'error' && 'Não foi possível conferir agora; o servidor validará o número ao cadastrar.'}
                   {phoneStatus === 'idle' && 'Obrigatório: este número permitirá recuperar suas fotos neste navegador se perder a sessão.'}
                 </div>
-                <button className="button button-primary stage-submit-button" type="submit" disabled={registering || nameStatus === 'unavailable' || nameStatus === 'checking' || phoneStatus === 'unavailable' || phoneStatus === 'checking' || phoneStatus === 'invalid' || name.trim().length < 2 || !whatsapp.trim() || health.state === 'offline'}>
+                <button className="button button-primary stage-submit-button" type="submit" disabled={registering || nameStatus === 'unavailable' || nameStatus === 'checking' || phoneStatus === 'unavailable' || phoneStatus === 'checking' || phoneStatus === 'invalid' || name.trim().length < 2 || !whatsapp.trim()}>
                   {registering ? <><LoaderCircle size={17} className="spin" /> Cadastrando...</> : <>Continuar para a câmera <Camera size={17} /></>}
                 </button>
-                {!health.supabaseConfigured && health.state === 'online' && (
-                  <p className="stage-setup-note">O backend está no ar, mas ainda falta configurar o Supabase para salvar cadastros e fotos.</p>
-                )}
                 <p className="stage-privacy-note">Ao continuar, você concorda que as fotos que publicar poderão aparecer na galeria compartilhada e no telão do casamento.</p>
               </form>
               ) : (
@@ -666,7 +620,7 @@ function GuestApp() {
                 <div><span className="section-kicker">SUAS LEMBRANÇAS</span><h2>Minhas fotos</h2><p>{guest ? `Fotos compartilhadas por ${guest.name}.` : 'Cadastre-se para ver e gerenciar as fotos da sua sessão.'}</p></div>
                 {guest && <button className="stage-secondary-button" type="button" onClick={loadMyPhotos}><RefreshCw size={15} /> Atualizar</button>}
               </div>
-              {guest ? <PhotoGrid photos={myPhotos} emptyTitle="Sua galeria está esperando" emptyDescription="Tire sua primeira foto para começar a guardar os momentos deste dia." onDelete={handleDeletePhoto} layout={eventSettings.gallery_layout} onOpen={(photo) => { setViewerSource('mine'); setViewerPhotoId(photo.id); }} /> : (
+              {guest ? <PhotoGrid photos={myPhotos} canReact={Boolean(guest)} onReact={handlePhotoReaction} emptyTitle="Sua galeria está esperando" emptyDescription="Tire sua primeira foto para começar a guardar os momentos deste dia." onDelete={handleDeletePhoto} layout={eventSettings.gallery_layout} onOpen={(photo) => { setViewerSource('mine'); setViewerPhotoId(photo.id); }} /> : (
                 <div className="stage-empty"><span className="stage-empty-icon"><UserRound size={26} /></span><h3>Entre para ver suas fotos</h3><p>O cadastro associa cada foto à sua sessão neste navegador.</p><button className="button button-primary" type="button" onClick={() => setActiveTab('participar')}>Participar agora</button></div>
               )}
             </div>
@@ -683,13 +637,13 @@ function GuestApp() {
                 </div>
               </div>
               {storiesError && <div className="stage-inline-warning" role="status"><AlertCircle size={18} /><span>{storiesError}</span><button type="button" className="stage-link-button" onClick={loadStories}>Tentar novamente</button></div>}
-              <PhotoGrid photos={stories} emptyTitle="Ainda não há fotos publicadas" emptyDescription="Assim que os convidados compartilharem as primeiras lembranças, elas aparecerão aqui." layout={eventSettings.gallery_layout} onOpen={(photo) => { setViewerSource('story'); setViewerPhotoId(photo.id); }} />
+              <PhotoGrid photos={stories} canReact={Boolean(guest)} onReact={handlePhotoReaction} emptyTitle="Ainda não há fotos publicadas" emptyDescription="Assim que os convidados compartilharem as primeiras lembranças, elas aparecerão aqui." layout={eventSettings.gallery_layout} onOpen={(photo) => { setViewerSource('story'); setViewerPhotoId(photo.id); }} />
             </div>
           )}
         </section>
       </main>
 
-      {viewerPhotoId && <StoryViewer photos={viewerPhotos} activeId={viewerPhotoId} onClose={closePhotoViewer} onMove={movePhotoViewer} />}
+      {viewerPhotoId && <StoryViewer photos={viewerPhotos} activeId={viewerPhotoId} onClose={closePhotoViewer} onMove={movePhotoViewer} canReact={Boolean(guest)} onReact={handlePhotoReaction} />}
 
       <footer className="footer stage-footer">
         <div className="section-wrap footer-inner">
@@ -713,6 +667,12 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
   const [filterKey, setFilterKey] = useState('natural');
   const [caption, setCaption] = useState('');
   const [emoji, setEmoji] = useState('');
+  const [captionPosition, setCaptionPosition] = useState('bottom');
+  const [captionColor, setCaptionColor] = useState('#FFFFFF');
+  const [captionSize, setCaptionSize] = useState('medium');
+  const [draftReady, setDraftReady] = useState(false);
+  const [editorMinimized, setEditorMinimized] = useState(false);
+  const [draftNotice, setDraftNotice] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadFailed, setUploadFailed] = useState(false);
   const [printSourcePending, setPrintSourcePending] = useState(false);
@@ -739,6 +699,46 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
   useEffect(() => () => {
     if (streamRef.current) streamRef.current.getTracks().forEach((track) => track.stop());
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDraftReady(false);
+    readPhotoDraft(guest.id)
+      .then((draft) => {
+        if (cancelled || !draft?.capturedImage) return;
+        setCapturedImage(draft.capturedImage);
+        setFilterKey(draft.filterKey || 'natural');
+        setCaption(draft.caption || '');
+        setEmoji(draft.emoji || '');
+        setCaptionPosition(draft.captionPosition || 'bottom');
+        setCaptionColor(draft.captionColor || '#FFFFFF');
+        setCaptionSize(draft.captionSize || 'medium');
+        uploadIdRef.current = draft.uploadId || null;
+        setUploadFailed(Boolean(draft.uploadFailed));
+        setEditorMinimized(true);
+        setDraftNotice('Encontramos uma edição salva neste aparelho. Você pode continuar de onde parou.');
+      })
+      .catch(() => {
+        if (!cancelled) setDraftNotice('Não foi possível recuperar um rascunho salvo neste navegador.');
+      })
+      .finally(() => { if (!cancelled) setDraftReady(true); });
+    return () => { cancelled = true; };
+  }, [guest.id]);
+
+  useEffect(() => {
+    if (!draftReady) return undefined;
+    if (!capturedImage) {
+      deletePhotoDraft(guest.id).catch(() => {});
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      savePhotoDraft(guest.id, {
+        capturedImage, filterKey, caption, emoji, captionPosition, captionColor, captionSize,
+        uploadId: uploadIdRef.current, uploadFailed,
+      }).catch(() => setDraftNotice('O navegador não conseguiu salvar o rascunho. Mantenha esta página aberta até publicar.'));
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [guest.id, draftReady, capturedImage, filterKey, caption, emoji, captionPosition, captionColor, captionSize, uploadFailed]);
 
   const startCamera = async (mode = facingMode) => {
     setCameraError('');
@@ -785,6 +785,8 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
     }
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     setCapturedImage(canvas.toDataURL('image/jpeg', 0.9));
+    setEditorMinimized(false);
+    setDraftNotice('');
     uploadIdRef.current = null;
     setUploadFailed(false);
     setCameraError('');
@@ -807,6 +809,8 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
     const reader = new FileReader();
     reader.onload = () => {
       setCapturedImage(String(reader.result));
+      setEditorMinimized(false);
+      setDraftNotice('');
       uploadIdRef.current = null;
       setUploadFailed(false);
       setCameraError('');
@@ -831,9 +835,9 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
       if (pendingPrintSourceRef.current) {
         ({ photo, blob: printBlob } = pendingPrintSourceRef.current);
       } else {
-        const storyBlob = await createEditedJpeg(capturedImage, filterKey, caption, emoji);
+        const storyBlob = await createEditedJpeg(capturedImage, filterKey);
         printBlob = await createPrintJpeg(capturedImage, filterKey);
-        const params = new URLSearchParams({ filter: filterKey, caption: caption.slice(0, 100), emoji: emoji.slice(0, 16) });
+        const params = new URLSearchParams({ filter: filterKey, caption: caption.slice(0, 100), emoji: emoji.slice(0, 16), captionPosition, captionColor, captionSize });
         if (!uploadIdRef.current) {
           uploadIdRef.current = typeof crypto !== 'undefined' && crypto.randomUUID
             ? crypto.randomUUID()
@@ -842,6 +846,9 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
               return (char === 'x' ? random : (random & 0x3) | 0x8).toString(16);
             });
         }
+        // Preserve a stable idempotency key before network I/O so restoring the draft
+        // after a lost response cannot create a second photo.
+        await savePhotoDraft(guest.id, { capturedImage, filterKey, caption, emoji, captionPosition, captionColor, captionSize, uploadId: uploadIdRef.current, uploadFailed: true }).catch(() => {});
         const uploadResult = await readApiResponse(await fetchWithRetry(`/api/photos?${params.toString()}`, {
           method: 'POST',
           credentials: 'same-origin',
@@ -872,7 +879,12 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
       setCapturedImage('');
       setCaption('');
       setEmoji('');
+      setCaptionPosition('bottom');
+      setCaptionColor('#FFFFFF');
+      setCaptionSize('medium');
       setFilterKey('natural');
+      setEditorMinimized(false);
+      setDraftNotice('');
       setUploadFailed(false);
       uploadIdRef.current = null;
       await onUploaded(photo);
@@ -900,8 +912,11 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
       </div>
 
       <div className="stage-studio-card">
-        {!capturedImage ? (
+        {!draftReady ? (
+          <div className="stage-draft-resume"><LoaderCircle size={23} className="spin" /><strong>Verificando rascunho salvo...</strong><p>Estamos procurando uma edição não publicada neste aparelho.</p></div>
+        ) : !capturedImage ? (
           <>
+            {draftNotice && <div className="stage-inline-warning" role="status"><span>{draftNotice}</span><button type="button" className="stage-link-button" onClick={() => setDraftNotice('')} aria-label="Fechar aviso"><X size={14} /></button></div>}
             <div className={`stage-camera-view ${stream ? 'camera-is-live' : ''}`}>
               {stream ? <video ref={videoRef} className={`stage-camera-video ${facingMode === 'user' ? 'video-selfie' : ''}`} playsInline muted autoPlay /> : (
                 <div className="stage-camera-placeholder"><span className="stage-camera-big-icon"><Camera size={32} /></span><strong>Sua próxima lembrança começa aqui</strong><span>Permita o acesso à câmera quando o navegador solicitar.</span></div>
@@ -927,12 +942,26 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
               <input ref={fileInputRef} type="file" accept="image/*" capture="environment" className="stage-visually-hidden" onChange={handleChooseFile} />
             </div>
           </>
+        ) : editorMinimized ? (
+          <div className="stage-draft-resume">
+            <span className="stage-form-icon"><ImageIcon size={22} /></span>
+            <h3>Seu rascunho está salvo</h3>
+            <p>A foto e suas edições ficaram guardadas neste aparelho. Você pode continuar agora ou descartar para começar outra foto.</p>
+            <img className="stage-draft-thumbnail" src={capturedImage} alt="Miniatura do rascunho" />
+            {draftNotice && <p className="stage-draft-notice" role="status">{draftNotice}</p>}
+            <div className="stage-preview-actions">
+              <button className="stage-secondary-button" type="button" disabled={uploading || printSourcePending} onClick={() => { setCapturedImage(''); setCaption(''); setEmoji(''); setFilterKey('natural'); setCaptionPosition('bottom'); setCaptionColor('#FFFFFF'); setCaptionSize('medium'); setUploadFailed(false); setEditorMinimized(false); setDraftNotice(''); uploadIdRef.current = null; pendingPrintSourceRef.current = null; setPrintSourcePending(false); deletePhotoDraft(guest.id).catch(() => {}); }}><X size={15} /> Descartar rascunho</button>
+              <button className="button button-primary" type="button" onClick={() => { setEditorMinimized(false); setDraftNotice(''); }}><Sparkles size={16} /> Continuar edição</button>
+            </div>
+          </div>
         ) : (
           <>
-            <div className="stage-preview-header"><div><span className="section-kicker">PRÉ-VISUALIZAÇÃO</span><h3>Gostou do resultado?</h3></div><button className="stage-icon-button" type="button" onClick={() => { setCapturedImage(''); uploadIdRef.current = null; setUploadFailed(false); setCameraError(''); }} aria-label="Cancelar edição" disabled={uploading || printSourcePending}><X size={17} /></button></div>
+            <div className="stage-preview-header"><div><span className="section-kicker">PRÉ-VISUALIZAÇÃO</span><h3>Gostou do resultado?</h3></div><button className="stage-icon-button" type="button" onClick={() => { setEditorMinimized(true); setDraftNotice('Rascunho salvo. Você pode continuar a edição quando quiser.'); }} aria-label="Guardar rascunho e fechar prévia" title="Guardar e voltar depois" disabled={uploading || printSourcePending}><X size={17} /></button></div>
             <div className="stage-photo-preview">
               <img src={capturedImage} alt="Prévia da fotografia" style={{ filter: (FILTERS.find((item) => item.key === filterKey) || FILTERS[0]).css }} />
-              {(caption.trim() || emoji) && <div className="stage-preview-overlay"><span>{emoji}</span>{caption.trim() && <p>{caption.trim()}</p>}</div>}
+              {(caption.trim() || emoji) && <div className={`stage-preview-overlay caption-position-${captionPosition} caption-size-${captionSize}`} style={{ color: captionColor, '--caption-color': captionColor, '--caption-font-size': captionSize === 'small' ? 'clamp(12px, 1.8vw, 17px)' : captionSize === 'large' ? 'clamp(19px, 3.2vw, 30px)' : 'clamp(15px, 2.4vw, 23px)' }}>
+                {emoji && <span>{emoji}</span>}{caption.trim() && <p>{caption.trim()}</p>}
+              </div>}
             </div>
             <div className="stage-filter-row" aria-label="Filtros da fotografia">
               {FILTERS.map((filter) => (
@@ -943,18 +972,35 @@ function CameraStudio({ guest, onUploaded, setGlobalMessage }) {
             </div>
             <label className="stage-field-label" htmlFor="photo-caption">Mensagem na foto <span className="optional">(opcional)</span></label>
             <textarea id="photo-caption" className="stage-input stage-caption-input" maxLength={100} rows={2} value={caption} disabled={uploading || printSourcePending} onChange={(event) => { if (uploadFailed && !printSourcePending) uploadIdRef.current = null; setCaption(event.target.value); setUploadFailed(false); }} placeholder="Uma lembrança para guardar..." />
-            <div className="stage-emoji-label">Escolha um emoji</div>
+            <div className="stage-caption-controls">
+              <label className="stage-field-label">Posição da legenda
+                <select className="stage-input" value={captionPosition} disabled={uploading || printSourcePending} onChange={(event) => { if (uploadFailed && !printSourcePending) uploadIdRef.current = null; setCaptionPosition(event.target.value); setUploadFailed(false); }}>
+                  <option value="top">Superior</option><option value="center">Centralizada</option><option value="bottom">Inferior</option>
+                </select>
+              </label>
+              <label className="stage-field-label">Tamanho do texto
+                <select className="stage-input" value={captionSize} disabled={uploading || printSourcePending} onChange={(event) => { if (uploadFailed && !printSourcePending) uploadIdRef.current = null; setCaptionSize(event.target.value); setUploadFailed(false); }}>
+                  <option value="small">Pequeno</option><option value="medium">Médio</option><option value="large">Grande</option>
+                </select>
+              </label>
+              <div className="stage-field-label">Cor do texto
+                <div className="stage-caption-color-row">
+                  {[['#FFFFFF','Branco'],['#FFE0E8','Rosa'],['#FFE4A8','Dourado'],['#24202B','Escuro'],['#DCE8FF','Azul claro']].map(([color,label]) => <button key={color} type="button" className={`stage-caption-color ${captionColor === color ? 'selected' : ''}`} style={{ background: color }} onClick={() => { if (uploadFailed && !printSourcePending) uploadIdRef.current = null; setCaptionColor(color); setUploadFailed(false); }} disabled={uploading || printSourcePending} aria-label={`Cor ${label}`} title={label} />)}
+                </div>
+              </div>
+            </div>
+            <div className="stage-emoji-label">Escolha um emoji (mais opções)</div>
             <div className="stage-emoji-row">
               {EMOJIS.map((item) => <button key={item} type="button" className={`stage-emoji-button ${emoji === item ? 'selected' : ''}`} disabled={uploading || printSourcePending} onClick={() => { if (uploadFailed && !printSourcePending) uploadIdRef.current = null; setEmoji(emoji === item ? '' : item); setUploadFailed(false); }} aria-label={`Adicionar emoji ${item}`}>{item}</button>)}
             </div>
             {cameraError && <div className="stage-inline-error"><AlertCircle size={16} /><span>{cameraError}</span></div>}
             <div className="stage-preview-actions">
-              <button className="stage-secondary-button" type="button" onClick={() => { setCapturedImage(''); setCaption(''); setEmoji(''); setCameraError(''); setUploadFailed(false); uploadIdRef.current = null; }} disabled={uploading || printSourcePending}><X size={15} /> Cancelar</button>
+              <button className="stage-secondary-button" type="button" onClick={() => { setCapturedImage(''); setCaption(''); setEmoji(''); setFilterKey('natural'); setCaptionPosition('bottom'); setCaptionColor('#FFFFFF'); setCaptionSize('medium'); setCameraError(''); setUploadFailed(false); setEditorMinimized(false); setDraftNotice(''); uploadIdRef.current = null; deletePhotoDraft(guest.id).catch(() => {}); }} disabled={uploading || printSourcePending}><X size={15} /> Descartar</button>
               <button className="button button-primary stage-publish-button" type="button" onClick={handlePublish} disabled={uploading}>
                 {uploading ? <><LoaderCircle size={17} className="spin" /> Enviando...</> : uploadFailed && printSourcePending ? <><RefreshCw size={16} /> Tentar salvar versão para impressão</> : uploadFailed ? <><RefreshCw size={16} /> Tentar novamente</> : <><Send size={16} /> Publicar foto</>}
               </button>
             </div>
-            <p className="stage-privacy-note">A versão com legenda e emoji aparece no story. Uma segunda versão limpa, sem sobreposições, será guardada para impressão.</p>
+            <p className="stage-privacy-note">A legenda e o emoji ficam separados da imagem original. Você pode ajustar o texto sem alterar a foto que será usada para impressão.</p>
           </>
         )}
       </div>

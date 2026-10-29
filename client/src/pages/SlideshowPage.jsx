@@ -24,6 +24,17 @@ export default function SlideshowPage() {
 
   useEffect(() => { activePhotoIdRef.current = currentPhoto?.id || null; }, [currentPhoto]);
 
+  // Precarrega a próxima foto para que a transição não mostre uma área vazia.
+  useEffect(() => {
+    if (photos.length < 2 || !currentPhoto) return undefined;
+    const nextPhoto = photos[(index + 1) % photos.length];
+    if (!nextPhoto?.url) return undefined;
+    const image = new Image();
+    image.decoding = 'async';
+    image.src = nextPhoto.url;
+    return () => { image.onload = null; image.onerror = null; };
+  }, [currentPhoto?.id, index, photos]);
+
   useEffect(() => {
     setImageFailedId(null);
   }, [currentPhoto?.id, currentPhoto?.url]);
@@ -119,14 +130,18 @@ export default function SlideshowPage() {
           <div className="slideshow-empty"><span className="slideshow-empty-icon"><Heart size={32} /></span><h1>As lembranças estão chegando</h1><p>Quando os convidados publicarem fotos, elas aparecerão aqui automaticamente.</p><button type="button" onClick={loadStories}><RefreshCw size={16} /> Verificar novamente</button></div>
         ) : (
           <article className={`slideshow-photo slideshow-photo-${settings.slideshow_transition || 'fade'}`} key={currentPhoto.id}>
-            {currentPhoto.url && imageFailedId !== currentPhoto.id
-              ? <img src={currentPhoto.url} alt={currentPhoto.caption || 'Foto do casamento'} onError={() => setImageFailedId(currentPhoto.id)} />
-              : <div className="slideshow-image-fallback"><p>Esta foto está temporariamente indisponível.</p>{photos.length > 1 && <button type="button" onClick={() => go(1)}>Próxima foto</button>}</div>}
-            <div className="slideshow-photo-caption">
-              {currentPhoto.emoji && <span className="slideshow-emoji">{currentPhoto.emoji}</span>}
-              {currentPhoto.caption && <p>{currentPhoto.caption}</p>}
-              <small>{currentPhoto.guest_name || 'Convidado'}</small>
-            </div>
+            {currentPhoto.url && imageFailedId !== currentPhoto.id ? (
+              <>
+                <img className="slideshow-photo-background" src={currentPhoto.url} alt="" aria-hidden="true" onError={() => setImageFailedId(currentPhoto.id)} />
+                <img className="slideshow-photo-main" src={currentPhoto.url} alt={currentPhoto.caption || 'Foto do casamento'} onError={() => setImageFailedId(currentPhoto.id)} />
+              </>
+            ) : <div className="slideshow-image-fallback"><p>Esta foto está temporariamente indisponível.</p>{photos.length > 1 && <button type="button" onClick={() => go(1)}>Próxima foto</button>}</div>}
+            {(currentPhoto.caption_render_mode === 'dom' || !currentPhoto.caption_render_mode) && (currentPhoto.emoji || currentPhoto.caption) && (
+              <div className={`slideshow-photo-caption caption-position-${currentPhoto.caption_position || 'bottom'} caption-size-${currentPhoto.caption_size || 'medium'}`} style={{ color: currentPhoto.caption_color || '#FFFFFF', '--caption-color': currentPhoto.caption_color || '#FFFFFF', '--caption-font-size': currentPhoto.caption_size === 'small' ? 'clamp(12px, 1.8vw, 17px)' : currentPhoto.caption_size === 'large' ? 'clamp(19px, 3.2vw, 30px)' : 'clamp(18px, 3vw, 34px)' }}>
+                {currentPhoto.emoji && <span className="slideshow-emoji">{currentPhoto.emoji}</span>}
+                {currentPhoto.caption && <p>{currentPhoto.caption}</p>}
+              </div>
+            )}
           </article>
         )}
       </section>

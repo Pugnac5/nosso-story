@@ -12,6 +12,7 @@ import {
 } from '../lib/guest-session.js';
 import { limitGuestRecovery } from '../lib/guest-recovery-limit.js';
 import { getSupabaseAdmin } from '../lib/supabase.js';
+import { attachPhotoReactionSummaries } from '../lib/photo-reactions.js';
 
 const router = Router();
 
@@ -278,7 +279,7 @@ router.get('/me/photos', requireGuestSession(), async (req, res, next) => {
     const bucket = process.env.SUPABASE_STORAGE_BUCKET?.trim() || 'wedding-photos';
     const { data, error } = await supabase
       .from('photos')
-      .select('id, storage_path, caption, emoji, filter_key, status, created_at')
+      .select('id, storage_path, caption, emoji, filter_key, caption_position, caption_color, caption_size, caption_render_mode, status, created_at')
       .eq('guest_id', req.guest.id)
       .neq('status', 'hidden')
       .order('created_at', { ascending: false })
@@ -290,11 +291,19 @@ router.get('/me/photos', requireGuestSession(), async (req, res, next) => {
         .from(bucket)
         .createSignedUrl(photo.storage_path, 60 * 60 * 24);
       if (signedError) console.error('Falha ao gerar URL de foto:', signedError.message);
-      return { ...photo, url: signed?.signedUrl ?? null };
+      return {
+        ...photo,
+        caption_position: photo.caption_position || 'bottom',
+        caption_color: photo.caption_color || '#FFFFFF',
+        caption_size: photo.caption_size || 'medium',
+        caption_render_mode: photo.caption_render_mode || 'baked',
+        url: signed?.signedUrl ?? null,
+      };
     }));
+    const photosWithReactions = await attachPhotoReactionSummaries(photos, req.guest.id);
 
     res.set('Cache-Control', 'no-store');
-    return res.json({ photos });
+    return res.json({ photos: photosWithReactions });
   } catch (error) {
     return next(error);
   }

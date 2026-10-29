@@ -25,6 +25,7 @@ export default function AdminPage() {
   const { refreshSettings } = useEventSettings();
   const [authLoading, setAuthLoading] = useState(true);
   const [configured, setConfigured] = useState(true);
+  const [serviceHealth, setServiceHealth] = useState({ state: 'checking', supabaseConfigured: false, error: '' });
   const [authenticated, setAuthenticated] = useState(false);
   const [password, setPassword] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
@@ -97,6 +98,19 @@ export default function AdminPage() {
     setSettings({ ...DEFAULT_EVENT_SETTINGS, ...(settingsResult.settings || {}) });
   }, [loadGuests, loadPhotos, photoFilter]);
 
+  const loadServiceHealth = useCallback(async () => {
+    setServiceHealth((previous) => ({ ...previous, state: previous.state === 'online' ? 'refreshing' : 'checking', error: '' }));
+    try {
+      const data = await apiRequest('/api/health', {
+        cache: 'no-store',
+        headers: { Accept: 'application/json', 'Cache-Control': 'no-store' },
+      });
+      setServiceHealth({ state: 'online', supabaseConfigured: Boolean(data.supabaseConfigured), error: '' });
+    } catch (error) {
+      setServiceHealth({ state: 'offline', supabaseConfigured: false, error: error.message || 'Não foi possível verificar a conexão.' });
+    }
+  }, []);
+
   useEffect(() => {
     let active = true;
     apiRequest('/api/admin/session')
@@ -112,6 +126,10 @@ export default function AdminPage() {
       .finally(() => { if (active) setAuthLoading(false); });
     return () => { active = false; };
   }, [loadAdminData]);
+
+  useEffect(() => {
+    if (authenticated) loadServiceHealth();
+  }, [authenticated, loadServiceHealth]);
 
   useEffect(() => {
     if (!printMode) return undefined;
@@ -403,6 +421,17 @@ export default function AdminPage() {
       <section className="admin-main">
         <div className="admin-page-heading"><div><span className="section-kicker">CONFIGURAÇÃO DO EVENTO</span><h1>Uma história com a identidade de vocês.</h1><p>Personalize o evento, consulte os convidados, selecione fotos para impressão e modere as lembranças compartilhadas.</p></div><a className="stage-secondary-button" href="/qr"><ImageIcon size={16} /> Preparar QR Code</a></div>
         {notice && <div className={`stage-alert stage-alert-${notice.type}`} role="status">{notice.type === 'error' ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}<span>{notice.text}</span><button type="button" onClick={() => setNotice(null)} aria-label="Fechar mensagem"><X size={15} /></button></div>}
+
+        <section className={`admin-api-health-card admin-api-health-${serviceHealth.state}`} aria-live="polite">
+          <div className="admin-api-health-icon">
+            {serviceHealth.state === 'online' ? <CheckCircle2 size={19} /> : serviceHealth.state === 'offline' ? <AlertCircle size={19} /> : <LoaderCircle className="spin" size={19} />}
+          </div>
+          <div className="admin-api-health-copy">
+            <strong>{serviceHealth.state === 'online' ? 'Aplicação conectada' : serviceHealth.state === 'offline' ? 'API indisponível' : serviceHealth.state === 'refreshing' ? 'Atualizando conexão' : 'Conferindo conexão'}</strong>
+            <p>{serviceHealth.state === 'offline' ? serviceHealth.error : serviceHealth.supabaseConfigured ? 'Backend e configuração do Supabase detectados.' : serviceHealth.state === 'online' ? 'O backend respondeu, mas a configuração do Supabase não foi detectada.' : 'Verificando o backend e a configuração do Supabase.'}</p>
+          </div>
+          <button className="admin-api-health-refresh" type="button" onClick={loadServiceHealth} disabled={serviceHealth.state === 'checking' || serviceHealth.state === 'refreshing'}><RefreshCw size={14} /> Verificar novamente</button>
+        </section>
 
         <div className="admin-dashboard-grid">
           <section className="admin-panel-card">

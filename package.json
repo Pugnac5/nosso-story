@@ -1,6 +1,6 @@
 {
   "name": "nosso-story",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "Casamento com galeria compartilhada, impressão em lote de fotos e identidade visual configurável pelo painel master.",
   "engines": {
@@ -14,8 +14,9 @@
     "dev": "concurrently -k -n API,WEB -c green,blue \"npm run dev --workspace server\" \"npm run dev --workspace client\"",
     "build": "npm run build --workspace client",
     "start": "node server/src/server.js",
-    "check": "npm run build && node --check server/src/app.js && node --check server/src/server.js && node --check server/src/lib/supabase.js && node --check server/src/lib/guest-session.js && node --check server/src/lib/guest-recovery-limit.js && node --check server/src/lib/admin-session.js && node --check server/src/routes/guests.routes.js && node --check server/src/routes/photos.routes.js && node --check server/src/routes/admin.routes.js && node --check server/src/routes/settings.routes.js",
-    "test:phase1": "node --test server/test/*.test.js"
+    "check": "npm run build && node --check server/src/app.js && node --check server/src/server.js && node --check server/src/lib/supabase.js && node --check server/src/lib/guest-session.js && node --check server/src/lib/guest-recovery-limit.js && node --check server/src/lib/admin-session.js && node --check server/src/lib/photo-presentation.js && node --check server/src/lib/photo-reactions.js && node --check server/src/routes/guests.routes.js && node --check server/src/routes/photos.routes.js && node --check server/src/routes/admin.routes.js && node --check server/src/routes/settings.routes.js",
+    "test:phase1": "node --test server/test/*.test.js",
+    "test:v06": "node --test server/test/v06.test.js"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

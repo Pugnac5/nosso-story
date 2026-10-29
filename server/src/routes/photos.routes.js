@@ -1,7 +1,9 @@
 import express, { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { getSupabaseAdmin, getStorageBucketName } from '../lib/supabase.js';
-import { requireGuestSession } from '../lib/guest-session.js';
+import { getGuestFromRequest, requireGuestSession } from '../lib/guest-session.js';
+import { attachPhotoReactionSummaries, getPhotoReactionSummary } from '../lib/photo-reactions.js';
+import { isAllowedReactionEmoji, normalizeCaptionColor, normalizeCaptionPosition, normalizeCaptionSize } from '../lib/photo-presentation.js';
 
 const router = Router();
 const ALLOWED_FILTERS = new Set(['natural', 'warm', 'mono', 'rose', 'soft']);
@@ -29,7 +31,7 @@ async function attachSignedUrl(photo, bucket) {
 async function findIdempotentPhoto(supabase, guestId, idempotencyKey) {
   const { data, error } = await supabase
     .from('photos')
-    .select('id, storage_path, caption, emoji, filter_key, status, created_at, idempotency_key')
+    .select('id, storage_path, caption, emoji, filter_key, status, created_at, idempotency_key, caption_position, caption_color, caption_size, caption_render_mode')
     .eq('guest_id', guestId)
     .eq('idempotency_key', idempotencyKey)
     .maybeSingle();
@@ -67,6 +69,9 @@ router.post('/', requireGuestSession(), async (req, res, next) => {
       const emoji = Array.from(String(req.query.emoji ?? '').trim()).slice(0, 16).join('');
       const requestedFilter = String(req.query.filter ?? 'natural');
       const filterKey = ALLOWED_FILTERS.has(requestedFilter) ? requestedFilter : 'natural';
+      const captionPosition = normalizeCaptionPosition(req.query.captionPosition);
+      const captionColor = normalizeCaptionColor(req.query.captionColor);
+      const captionSize = normalizeCaptionSize(req.query.captionSize);
       const supabase = getSupabaseAdmin();
       const bucket = getStorageBucketName();
 
@@ -118,8 +123,12 @@ router.post('/', requireGuestSession(), async (req, res, next) => {
           emoji: emoji || null,
           filter_key: filterKey,
           status: photoStatus,
+          caption_position: captionPosition,
+          caption_color: captionColor,
+          caption_size: captionSize,
+          caption_render_mode: 'dom',
         })
-        .select('id, storage_path, caption, emoji, filter_key, status, created_at, idempotency_key')
+        .select('id, storage_path, caption, emoji, filter_key, status, created_at, idempotency_key, caption_position, caption_color, caption_size, caption_render_mode')
         .single();
 
       if (insertError) {
@@ -217,7 +226,64 @@ router.post('/:photoId/print-source', requireGuestSession(), async (req, res, ne
   });
 });
 
-router.get('/stories', async (_req, res, next) => {
+router.post('/:photoId/reactions', requireGuestSession(), async (req, res, next) => {
+  try {
+    const photoId = String(req.params.photoId || '');
+    if (!UUID_PATTERN.test(photoId)) {
+      return res.status(400).json({ error: 'Identificador de foto inválido.', code: 'PHOTO_INVALID_ID' });
+    }
+    const emoji = String(req.body?.emoji ?? '');
+    if (!isAllowedReactionEmoji(emoji)) {
+      return res.status(400).json({ error: 'Escolha uma reação válida.', code: 'REACTION_INVALID' });
+    }
+
+    const supabase = getSupabaseAdmin();
+    if (!supabase) return res.status(503).json({ error: 'Supabase não configurado.', code: 'SUPABASE_NOT_CONFIGURED', retryable: true });
+
+    const { data: photo, error: photoError } = await supabase
+      .from('photos')
+      .select('id, status')
+      .eq('id', photoId)
+      .eq('status', 'published')
+      .maybeSingle();
+    if (photoError) throw photoError;
+    if (!photo) return res.status(404).json({ error: 'Esta foto não está disponível para reações.', code: 'PHOTO_NOT_AVAILABLE' });
+
+    const { data: existing, error: existingError } = await supabase
+      .from('photo_reactions')
+      .select('emoji')
+      .eq('photo_id', photoId)
+      .eq('guest_id', req.guest.id)
+      .maybeSingle();
+    if (existingError) throw existingError;
+
+    const shouldBeActive = req.body?.active !== false;
+    if (!shouldBeActive) {
+      // Desired-state DELETE is idempotent: retrying after a lost response is safe.
+      const { error: deleteError } = await supabase
+        .from('photo_reactions')
+        .delete()
+        .eq('photo_id', photoId)
+        .eq('guest_id', req.guest.id)
+        .eq('emoji', emoji);
+      if (deleteError) throw deleteError;
+    } else {
+      // Desired-state UPSERT is also idempotent and safe to repeat after a network failure.
+      const { error: upsertError } = await supabase
+        .from('photo_reactions')
+        .upsert({ photo_id: photoId, guest_id: req.guest.id, emoji, created_at: new Date().toISOString() }, { onConflict: 'photo_id,guest_id' });
+      if (upsertError) throw upsertError;
+    }
+
+    const summary = await getPhotoReactionSummary(photoId, req.guest.id);
+    res.set('Cache-Control', 'no-store');
+    return res.json({ photo_id: photoId, reactions: summary.reactions, my_reaction: summary.my_reaction });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.get('/stories', async (req, res, next) => {
   const supabase = getSupabaseAdmin();
   if (!supabase) {
     return res.status(503).json({ error: 'O banco de dados ainda não está configurado.', code: 'SUPABASE_NOT_CONFIGURED', retryable: true });
@@ -226,7 +292,7 @@ router.get('/stories', async (_req, res, next) => {
   try {
     const { data, error } = await supabase
       .from('photos')
-      .select('id, storage_path, caption, emoji, filter_key, created_at, guests(name)')
+      .select('id, storage_path, caption, emoji, filter_key, caption_position, caption_color, caption_size, caption_render_mode, status, created_at, guests(name)')
       .eq('status', 'published')
       .order('created_at', { ascending: false })
       .limit(100);
@@ -243,14 +309,21 @@ router.get('/stories', async (_req, res, next) => {
         caption: photo.caption,
         emoji: photo.emoji,
         filter_key: photo.filter_key,
+        caption_position: photo.caption_position || 'bottom',
+        caption_color: photo.caption_color || '#FFFFFF',
+        caption_size: photo.caption_size || 'medium',
+        caption_render_mode: photo.caption_render_mode || 'baked',
+        status: photo.status || 'published',
         created_at: photo.created_at,
         guest_name: photo.guests?.name ?? 'Convidado',
         url: signed?.signedUrl ?? null,
       };
     }));
 
+    const viewer = await getGuestFromRequest(req, res);
+    const photosWithReactions = await attachPhotoReactionSummaries(photos, viewer?.id ?? null);
     res.set('Cache-Control', 'no-store');
-    return res.json({ photos });
+    return res.json({ photos: photosWithReactions });
   } catch (error) {
     return next(error);
   }
